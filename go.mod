@@ -10,7 +10,7 @@ require (
 	github.com/hajimehoshi/ebiten/v2 v2.10.5
 	github.com/klauspost/compress v1.20.1
 	github.com/user-none/eblitui/coreif v0.9.0
-	github.com/user-none/eblitui/desktop v0.6.0
+	github.com/user-none/eblitui/desktop v0.6.1
 	github.com/user-none/eblitui/romloader v0.4.1
 	github.com/user-none/eblitui/rumble v1.0.0
 	github.com/user-none/go-chip-m68k v0.1.2

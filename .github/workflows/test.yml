@@ -68,6 +68,8 @@ jobs:
         shell: bash
         run: go vet ./internal/hostgpu/... ./core/...
 
-      - name: Test
-        shell: bash
-        run: go test ./internal/hostgpu/... ./core/...
+      # No hardware adaptor and the software on in the CI will take an hour to run
+      # Running a software adapator doesn't actually test anything either
+      #- name: Test
+      #  shell: bash
+      #  run: go test ./internal/hostgpu/... ./core/...
