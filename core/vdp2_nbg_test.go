@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"github.com/user-none/erings/core/compute/screen"
+	"testing"
+)
 
 // setupNBG0LineScrollScene builds NBG0 as a 256-color 2-word cell screen
 // with one tile at cell (0,0) whose dot is 10 + column on rows 0-3 and
@@ -54,13 +57,13 @@ func writeLineScrollEntry(v *VDP2, addr uint32, intPart uint16, frac uint8) {
 // CRAM value column + 1).
 func expectRedShade(t *testing.T, v *VDP2, buf []uint32, x, y, column int, what string) {
 	t.Helper()
-	wantR, _, _ := rgb555ToRGB(uint16(column + 1))
+	wantR := uint8(screen.ColorR(screen.RGB555To888(uint32(column + 1))))
 	px := buf[y*v.frame.width+x]
 	if px == 0 {
 		t.Errorf("%s: pixel(%d,%d) transparent, want red shade %d", what, x, y, column)
 		return
 	}
-	if r, g := uint8(px>>16), uint8(px>>8); r != wantR || g != 0 {
+	if r, g := uint8(screen.ColorR(px)), uint8(screen.ColorG(px)); r != wantR || g != 0 {
 		t.Errorf("%s: pixel(%d,%d) = (%d,%d), want red shade %d (%d,0)", what, x, y, r, g, column, wantR)
 	}
 }
@@ -69,13 +72,13 @@ func expectRedShade(t *testing.T, v *VDP2, buf []uint32, x, y, column int, what 
 // CRAM value (column + 1) << 5).
 func expectGreenShade(t *testing.T, v *VDP2, buf []uint32, x, y, column int, what string) {
 	t.Helper()
-	_, wantG, _ := rgb555ToRGB(uint16(column+1) << 5)
+	wantG := uint8(screen.ColorG(screen.RGB555To888(uint32(column+1) << 5)))
 	px := buf[y*v.frame.width+x]
 	if px == 0 {
 		t.Errorf("%s: pixel(%d,%d) transparent, want green shade %d", what, x, y, column)
 		return
 	}
-	if r, g := uint8(px>>16), uint8(px>>8); g != wantG || r != 0 {
+	if r, g := uint8(screen.ColorR(px)), uint8(screen.ColorG(px)); g != wantG || r != 0 {
 		t.Errorf("%s: pixel(%d,%d) = (%d,%d), want green shade %d (0,%d)", what, x, y, r, g, column, wantG)
 	}
 }
@@ -90,7 +93,7 @@ func TestLineScrollY(t *testing.T) {
 	writeLineScrollEntry(v, 0x20000, 0, 0) // line 0: row 0
 	writeLineScrollEntry(v, 0x20004, 4, 0) // line 1: row 4
 	writeLineScrollEntry(v, 0x20008, 1, 0) // line 2: row 1
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 0, 0, 0, "line 0 row 0")
 	expectRedShade(t, v, buf, 2, 0, 2, "line 0 row 0 column 2")
@@ -107,7 +110,7 @@ func TestLineZoomX(t *testing.T) {
 	writeLineScrollEntry(v, 0x20000, 1, 0)    // line 0: 1.0
 	writeLineScrollEntry(v, 0x20004, 2, 0)    // line 1: 2.0
 	writeLineScrollEntry(v, 0x20008, 0, 0x80) // line 2: 0.5
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 1, 0, 1, "line 0 zoom 1.0 x 1")
 	expectRedShade(t, v, buf, 1, 1, 2, "line 1 zoom 2.0 x 1")
@@ -127,7 +130,7 @@ func TestLineScrollAllFields(t *testing.T) {
 	writeLineScrollEntry(v, 0x2000C, 2, 0) // line 1 X
 	writeLineScrollEntry(v, 0x20010, 4, 0) // line 1 Y
 	writeLineScrollEntry(v, 0x20014, 1, 0) // line 1 zoom
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 0, 0, 0, "line 0")
 	expectGreenShade(t, v, buf, 0, 1, 2, "line 1 X+2 row 4")
@@ -149,7 +152,7 @@ func TestLineScrollLSMD3(t *testing.T) {
 		writeLineScrollEntry(v, 0x20000+line*4, uint16(line), 0) // displayed line d: X +d
 	}
 	setLSMD3(v, true)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 0, 0, 1, "field 1 line 0 = displayed 1")
 	expectRedShade(t, v, buf, 0, 1, 3, "field 1 line 1 = displayed 3")
@@ -191,7 +194,7 @@ func TestLineScrollBitmap(t *testing.T) {
 	writeLineScrollEntry(v, 0x2000C, 2, 0) // line 1 X +2
 	writeLineScrollEntry(v, 0x20010, 4, 0) // line 1 vertical coordinate 4
 	writeLineScrollEntry(v, 0x20014, 2, 0) // line 1 zoom 2.0
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 1, 0, 1, "line 0")
 	expectGreenShade(t, v, buf, 0, 1, 2, "line 1 x 0 -> dot 2 row 4")
@@ -232,17 +235,17 @@ func TestDecodePattern1WordAllModes(t *testing.T) {
 		{"256-color aux1 2x2", 1, true, false, 0x6F37, 0x20, false, false},
 	}
 	for _, tc := range cases {
-		charNum, palette, hflip, vflip := decodePattern1Word(pn, pnc, tc.colorMode, tc.aux1, tc.charSize1x1)
-		if charNum != tc.wantChar || palette != tc.wantPal || hflip != tc.wantH || vflip != tc.wantV {
+		charNum, palette, hflip, vflip := screen.DecodePattern1Word(uint32(pn), uint32(pnc), uint32(tc.colorMode), tc.aux1, !tc.charSize1x1)
+		if charNum != tc.wantChar || palette != uint32(tc.wantPal) || hflip != tc.wantH || vflip != tc.wantV {
 			t.Errorf("%s: char=0x%X pal=0x%02X h=%v v=%v, want 0x%X 0x%02X %v %v",
 				tc.name, charNum, palette, hflip, vflip, tc.wantChar, tc.wantPal, tc.wantH, tc.wantV)
 		}
 	}
 	// Horizontal flip bit 10 in the aux 0 formats.
-	if _, _, hflip, _ := decodePattern1Word(0x0400, 0, 0, false, true); !hflip {
+	if _, _, hflip, _ := screen.DecodePattern1Word(0x0400, 0, 0, false, false); !hflip {
 		t.Error("16-color aux0: bit 10 should set hflip")
 	}
-	if _, _, hflip, _ := decodePattern1Word(0x0400, 0, 1, false, true); !hflip {
+	if _, _, hflip, _ := screen.DecodePattern1Word(0x0400, 0, 1, false, false); !hflip {
 		t.Error("256-color aux0: bit 10 should set hflip")
 	}
 }
@@ -258,8 +261,8 @@ func TestRenderNBG_Bitmap2048And32K(t *testing.T) {
 		tpOn       [3]uint8
 		wantOpaque [3]uint8
 	}{
-		{"2048-color", 0x0022, 0x0005, 0x0000, [3]uint8{0, 255, 0}, [3]uint8{255, 0, 0}},
-		{"32768-color", 0x0032, 0x801F, 0x001F, [3]uint8{255, 0, 0}, [3]uint8{255, 0, 0}},
+		{"2048-color", 0x0022, 0x0005, 0x0000, [3]uint8{0, 248, 0}, [3]uint8{248, 0, 0}},
+		{"32768-color", 0x0032, 0x801F, 0x001F, [3]uint8{248, 0, 0}, [3]uint8{248, 0, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := newTestVDP2()
@@ -272,7 +275,7 @@ func TestRenderNBG_Bitmap2048And32K(t *testing.T) {
 			writeVRAM16(v, 2, tc.w1)
 			writeCRAM16Test(v, 0, 0x03E0) // entry 0: green
 			writeCRAM16Test(v, 5, 0x001F) // entry 5: red
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestNBG(v, 0, buf)
 			expectRGB(t, v, buf, 0, 0, tc.wantOpaque[0], tc.wantOpaque[1], tc.wantOpaque[2], tc.name+" opaque dot")
 			expectTransparent(t, v, buf, 1, 0, tc.name+" transparent dot")
@@ -321,12 +324,12 @@ func TestNBGBitmap1024Wide(t *testing.T) {
 			v.vram[88] = 6  // dot 88 of a 512-wide row 0 (600 mod 512)
 			writeCRAM16Test(v, 5, 0x001F)
 			writeCRAM16Test(v, 6, 0x03E0)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestNBG(v, tc.screen, buf)
 			if wide {
-				expectRGB(t, v, buf, 0, 0, 255, 0, 0, tc.name+" 1024 wide")
+				expectRGB(t, v, buf, 0, 0, 248, 0, 0, tc.name+" 1024 wide")
 			} else {
-				expectRGB(t, v, buf, 0, 0, 0, 255, 0, tc.name+" 512 wide")
+				expectRGB(t, v, buf, 0, 0, 0, 248, 0, tc.name+" 512 wide")
 			}
 		}
 	}
@@ -363,7 +366,7 @@ func setupNBG1ColumnScene(t *testing.T) *VDP2 {
 func TestZMCTLQuarterClampNBG1(t *testing.T) {
 	v := setupNBG1ColumnScene(t)
 	v.regs[vdp2ZMXIN1] = 0x0006
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 1, buf)
 	expectRedShade(t, v, buf, 1, 0, 1, "no reduction enable: increment clamped to 1.0")
 	v.regs[vdp2ZMCTL] = 0x0200
@@ -381,7 +384,7 @@ func TestLineScrollNBG1Table(t *testing.T) {
 	v.regs[vdp2LSTA1L] = 0x0000 // table at 0x20000
 	writeLineScrollEntry(v, 0x20000, 0, 0)
 	writeLineScrollEntry(v, 0x20004, 2, 0)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 1, buf)
 	expectRedShade(t, v, buf, 0, 0, 0, "line 0")
 	expectRedShade(t, v, buf, 0, 1, 2, "line 1 X+2")
@@ -395,7 +398,7 @@ func TestLineScrollYInterval(t *testing.T) {
 	v.regs[vdp2SCRCTL] = 0x0004 | 0x0010   // N0LSCY, interval 2
 	writeLineScrollEntry(v, 0x20000, 0, 0) // lines 0-1: rows 0, 1
 	writeLineScrollEntry(v, 0x20004, 4, 0) // lines 2-3: rows 4, 5
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRedShade(t, v, buf, 0, 0, 0, "line 0 row 0")
 	expectRedShade(t, v, buf, 0, 1, 0, "line 1 row 1")
@@ -440,11 +443,11 @@ func TestRenderNBG_2x2VerticalFlip(t *testing.T) {
 	v.cram[44], v.cram[45] = 0x7F, 0xFF
 	writeVRAM16(v, 0, 0x8001) // vflip, palette 1
 	writeVRAM16(v, 2, 0x0400)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "vflip top-left shows bottom-left sub-cell")
-	expectRGB(t, v, buf, 8, 0, 255, 255, 255, "vflip top-right shows bottom-right sub-cell")
-	expectRGB(t, v, buf, 0, 8, 255, 0, 0, "vflip bottom-left shows top-left sub-cell")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "vflip top-left shows bottom-left sub-cell")
+	expectRGB(t, v, buf, 8, 0, 248, 248, 248, "vflip top-right shows bottom-right sub-cell")
+	expectRGB(t, v, buf, 0, 8, 248, 0, 0, "vflip bottom-left shows top-left sub-cell")
 }
 
 // TestNBGSpecialCCMode2And3 verifies NBG special color calculation mode 2
@@ -458,7 +461,7 @@ func TestNBGSpecialCCMode2And3(t *testing.T) {
 		v.regs[vdp2SFCCMD] = 0x0002
 		v.regs[vdp2SFCODE] = sfcode
 		v.regs[vdp2CCCTL] = 0x0001
-		buf := make([]uint32, 352*256)
+		buf := make([]uint32, testFrameDots)
 		renderTestNBG(v, 0, buf)
 		return buf[0]
 	}
@@ -482,7 +485,7 @@ func TestNBGSpecialCCMode2And3(t *testing.T) {
 	fillVRAM16(v, 0x8000, 64, 0x801F)
 	v.regs[vdp2SFCCMD] = 0x0003
 	v.regs[vdp2CCCTL] = 0x0001
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	if buf[0] == 0 || buf[0]&layerCCBit == 0 {
 		t.Errorf("mode 3 RGB cell: 0x%08X, want CC bit", buf[0])
@@ -528,7 +531,7 @@ func TestNBGBitmapMosaicAndNegativeScroll(t *testing.T) {
 		}
 		return v
 	}
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v := setup()
 	v.regs[vdp2MZCTL] = 0x0001 | 0x0300 | 0x3000 // NBG0 mosaic 4x4
@@ -547,7 +550,7 @@ func TestNBGBitmapMosaicAndNegativeScroll(t *testing.T) {
 	writeCRAM16Test(v, 7, 0x7C00)
 	clear(buf)
 	renderTestNBG(v, 0, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "scroll (-1,-1) reads dot (511,255)")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "scroll (-1,-1) reads dot (511,255)")
 }
 
 // TestNBGMapOffsetOneWord2x2 verifies the NBG0 map offset (MPOFN bits 2:0)
@@ -575,14 +578,14 @@ func TestNBGMapOffsetOneWord2x2(t *testing.T) {
 		writeVRAM16(v, 0x20000, 0x1100)
 		return v
 	}
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v := build(0x0001)
 	renderTestNBG(v, 0, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "map offset 1: top-left sub-cell")
-	expectRGB(t, v, buf, 8, 0, 0, 255, 0, "map offset 1: top-right sub-cell")
-	expectRGB(t, v, buf, 0, 8, 0, 0, 255, "map offset 1: bottom-left sub-cell")
-	expectRGB(t, v, buf, 8, 8, 255, 255, 255, "map offset 1: bottom-right sub-cell")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "map offset 1: top-left sub-cell")
+	expectRGB(t, v, buf, 8, 0, 0, 248, 0, "map offset 1: top-right sub-cell")
+	expectRGB(t, v, buf, 0, 8, 0, 0, 248, "map offset 1: bottom-left sub-cell")
+	expectRGB(t, v, buf, 8, 8, 248, 248, 248, "map offset 1: bottom-right sub-cell")
 
 	v = build(0x0000)
 	clear(buf)

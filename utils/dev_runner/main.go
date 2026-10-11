@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/pprof"
 	"syscall"
 
@@ -21,10 +22,32 @@ import (
 	"github.com/user-none/erings/internal/replay"
 )
 
+// memProfileRate is the bytes allocated per sampled allocation while
+// -memprofile is set.
+const memProfileRate = 4096
+
+// writeMemProfile writes the allocation profile to path, every
+// allocation sampled since start, when path is set.
+func writeMemProfile(path string) {
+	if path == "" {
+		return
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		log.Printf("Warning: failed to create memory profile %q: %v", path, err)
+		return
+	}
+	defer f.Close()
+	if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+		log.Printf("Warning: failed to write memory profile %q: %v", path, err)
+	}
+}
+
 func main() {
 	biosPath := flag.String("bios", "", "Path to Saturn BIOS ROM (512KB). Optional - if omitted, the HLE BIOS boots the disc directly.")
 	discPath := flag.String("disc", "", "Path to CHD V5 or cue disc image.")
 	cpuProfile := flag.String("cpuprofile", "", "Write CPU profile to file.")
+	memProfile := flag.String("memprofile", "", "Write an allocation profile to file on exit (go tool pprof -sample_index=alloc_space).")
 	dumpDir := flag.String("dump-dir", ".", "Directory to write memory dumps into (created if missing).")
 	savePath := flag.String("save", "", "Path to backup-RAM save file. If a directory, uses <gameid>.srm inside it. Loaded on start (if it exists) and written on close.")
 	fastBoot := flag.Bool("fast-boot", false, "Skip the real BIOS boot animation and enter the disc IP directly (real BIOS only).")
@@ -36,6 +59,8 @@ func main() {
 	debugServerPort := flag.Int("debug-server-port", 5000, "Debug server TCP port.")
 	p1Pad := flag.String("p1-pad", "0", "Gamepad index for player 1, or \"none\". Keyboard is always player 1.")
 	p2Pad := flag.String("p2-pad", "1", "Gamepad index for player 2, or \"none\".")
+	renderer := flag.String("renderer", "gpu", "Renderer: gpu (fails if the GPU renderer cannot initialize) or software.")
+	upscale := flag.String("upscale", "1x", "Internal resolution: 1x (native), 2x, 4x, 8x, or 16x.")
 	flag.Parse()
 
 	if *record != "" && *replayPath != "" {
@@ -67,6 +92,12 @@ func main() {
 		}
 		cpuProfileFile = f
 	}
+	if *memProfile != "" {
+		// Sample an allocation per 4 KB allocated rather than the
+		// default 512 KB, so the small allocations a frame makes
+		// show up in a run of a few minutes.
+		runtime.MemProfileRate = memProfileRate
+	}
 
 	if *biosPath == "" && *discPath == "" {
 		fmt.Fprintln(os.Stderr, "Usage: saturn -bios <path> [-disc <path>]  OR  saturn -disc <path>  (HLE BIOS)")
@@ -74,6 +105,13 @@ func main() {
 	}
 
 	emu := core.NewEmulator()
+	if err := emu.SetUpscale(*upscale); err != nil {
+		log.Fatalf("upscale: %v", err)
+	}
+	if err := emu.SetRendererByName(*renderer); err != nil {
+		log.Fatalf("renderer: %v", err)
+	}
+	fmt.Printf("[RENDER] renderer: %s\n", emu.RendererName())
 
 	if *biosPath != "" {
 		biosData, err := os.ReadFile(*biosPath)
@@ -153,6 +191,7 @@ func main() {
 			pprof.StopCPUProfile()
 			cpuProfileFile.Close()
 		}
+		writeMemProfile(*memProfile)
 		os.Exit(0)
 	}()
 
@@ -249,6 +288,7 @@ func main() {
 		pprof.StopCPUProfile()
 		cpuProfileFile.Close()
 	}
+	writeMemProfile(*memProfile)
 	if disc != nil {
 		disc.Close()
 	}

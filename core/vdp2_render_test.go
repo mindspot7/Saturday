@@ -3,7 +3,17 @@
 
 package core
 
-import "testing"
+import (
+	"github.com/user-none/erings/core/compute"
+	"github.com/user-none/erings/core/compute/screen"
+	"testing"
+)
+
+// testFrameDots is the length of a layer or line color buffer a test
+// owns to hold every row of a frame, indexed by the field line as the
+// VDP2's own records place them: the largest display, 704 by 512 dots,
+// rounded up to a power of two.
+const testFrameDots = 1 << 19
 
 // newTestVDP2 creates a VDP2 with DISP=1 for rendering tests.
 func newTestVDP2() *VDP2 {
@@ -20,30 +30,79 @@ func newTestVDP2() *VDP2 {
 	return v
 }
 
-// renderTestFrame drives the production per-line render sequence:
-// latch, then every line (each line composites its own framebuffer
-// row). Mirrors RunFrame's usage.
-func renderTestFrame(v *VDP2) {
-	renderTestFrameFB(v, vdp1FBView{})
+// renderLineTest produces the complete frame row y through r in one
+// call: beginRow plus the render point, the software renderer's row
+// schedule. A row writes only r's layer buffers, its RBG line-color
+// buffers, and its frame row frameOutRow(y).
+func (v *VDP2) renderLineTest(r *softwareRenderer, y int, fb vdp1FBView) {
+	beginRow(v, r, y, fb)
+	r.renderLine(y)
+}
+
+// renderTestFrame drives the production per-line render sequence
+// through r: latch, then every line (each line composites its own
+// frame row). Mirrors RunFrame's usage.
+func renderTestFrame(v *VDP2, r *softwareRenderer) {
+	renderTestFrameFB(v, r, vdp1FBView{})
 }
 
 // renderTestFrameFB drives the production per-line render sequence
-// with the given VDP1 display framebuffer view.
-func renderTestFrameFB(v *VDP2, fb vdp1FBView) {
+// through r with the given VDP1 display framebuffer view.
+func renderTestFrameFB(v *VDP2, r *softwareRenderer, fb vdp1FBView) {
 	v.BeginFrame()
+	r.beginFrame()
 	for y := 0; y < v.frame.height; y++ {
-		v.RenderLine(y, fb)
+		v.renderLineTest(r, y, fb)
 	}
 }
 
-// compositeTestFrame composites every row from the current layer
-// buffer contents without rendering layers, for tests that populate
-// the layer buffers by hand.
-func compositeTestFrame(v *VDP2) {
+// renderedLayerDot renders the frame v holds through r up to row y and
+// returns dot x of the layer buffer's row as row y's render point left
+// it, the only time the renderer holds the row.
+func renderedLayerDot(v *VDP2, r *softwareRenderer, layer, x, y int) uint32 {
 	v.BeginFrame()
+	r.beginFrame()
+	for row := 0; row <= y; row++ {
+		v.renderLineTest(r, row, vdp1FBView{})
+	}
+	return r.in.Layers[layer][x]
+}
+
+// layerFrameEmpty renders the frame v holds through r and reports
+// whether every dot of the layer buffer's row is transparent at every
+// row's render point.
+func layerFrameEmpty(v *VDP2, r *softwareRenderer, layer int) bool {
+	v.BeginFrame()
+	r.beginFrame()
+	for y := 0; y < v.frame.height; y++ {
+		v.renderLineTest(r, y, vdp1FBView{})
+		for x := 0; x < v.frame.width; x++ {
+			if r.in.Layers[layer][x] != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// compositeTestFrame composites every row from the current contents
+// of r's layer buffers without rendering layers, for tests that
+// populate the layer buffers by hand: every row reads the renderer's
+// one row slot, which the test filled. A layer buffer the frame start
+// grows keeps the dots the test wrote.
+func compositeTestFrame(v *VDP2, r *softwareRenderer) {
+	filled := r.in.Layers
+	v.BeginFrame()
+	r.beginFrame()
+	for i := range filled {
+		copy(r.in.Layers[i], filled[i])
+	}
 	v.decodeLineState()
 	for y := 0; y < v.frame.height; y++ {
-		v.compositeSpanSetup(y)(0, v.frame.width)
+		v.compositeSpanSetup(y)
+		comp := v.rowRecord(v.lineY).Comp
+		comp.Y = 0
+		screen.CompositeSpan(&r.in, r.outputFramebuffer, &comp, 0, int32(v.frame.width))
 	}
 }
 
@@ -57,13 +116,20 @@ func renderTestNBG(v *VDP2, screen int, buf []uint32) {
 		return
 	}
 	for y := 0; y < v.frame.height; y++ {
-		v.nbgSpanSetup(buf, &v.frame.nbg[screen], screen, y)(0, v.frame.width)
+		v.nbgSpanSetup(&v.frame.nbg[screen], screen, y)
+		nbgSpanTest(v, buf, screen, y, 0, v.frame.width)
 	}
 }
 
 // renderTestRBG0 drives the production per-line path to render a full
 // frame of RBG0 into buf.
 func renderTestRBG0(v *VDP2, buf []uint32) {
+	renderTestRBG0LineColor(v, buf, nil)
+}
+
+// renderTestRBG0LineColor renders a full frame of RBG0 into buf and
+// its coefficient line colors into lc.
+func renderTestRBG0LineColor(v *VDP2, buf []uint32, lc []uint8) {
 	v.BeginFrame()
 	v.decodeLineState()
 	if !v.frame.rbg0On {
@@ -71,29 +137,31 @@ func renderTestRBG0(v *VDP2, buf []uint32) {
 		return
 	}
 	for y := 0; y < v.frame.height; y++ {
-		v.rbg0SpanSetup(buf, &v.frame.rbg0, &v.frame.rbg0F, y)(0, v.frame.width)
+		v.rbg0SpanSetup(&v.frame.rbg0, &v.frame.rbg0F, y)
+		rbgSpanTest(v, buf, lc, &v.rowRecord(y).RBG[0], 0, v.frame.width)
 	}
 }
 
-func TestRGB555ToRGB(t *testing.T) {
+func TestRGB555To888(t *testing.T) {
 	tests := []struct {
 		name    string
 		val     uint16
 		r, g, b uint8
 	}{
 		{"black", 0x0000, 0, 0, 0},
-		{"white", 0x7FFF, 255, 255, 255},
-		{"white_bit15", 0xFFFF, 255, 255, 255},
-		{"red", 0x001F, 255, 0, 0},
-		{"green", 0x03E0, 0, 255, 0},
-		{"blue", 0x7C00, 0, 0, 255},
+		{"white", 0x7FFF, 248, 248, 248},
+		{"white_bit15", 0xFFFF, 248, 248, 248},
+		{"red", 0x001F, 248, 0, 0},
+		{"green", 0x03E0, 0, 248, 0},
+		{"blue", 0x7C00, 0, 0, 248},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, g, b := rgb555ToRGB(tt.val)
+			rgb := screen.RGB555To888(uint32(tt.val))
+			r, g, b := uint8(screen.ColorR(rgb)), uint8(screen.ColorG(rgb)), uint8(screen.ColorB(rgb))
 			if r != tt.r || g != tt.g || b != tt.b {
-				t.Errorf("rgb555ToRGB(0x%04X) = (%d,%d,%d), want (%d,%d,%d)",
+				t.Errorf("RGB555To888(0x%04X) = (%d,%d,%d), want (%d,%d,%d)",
 					tt.val, r, g, b, tt.r, tt.g, tt.b)
 			}
 		})
@@ -102,32 +170,34 @@ func TestRGB555ToRGB(t *testing.T) {
 
 func TestBackScreenSingleColor(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Write a red color (RGB555: R=31, G=0, B=0 = 0x001F) to VRAM[0:2].
 	// Bit 15 is left clear: back screen data ignores it (manual Fig 7.5).
 	v.vram[0] = 0x00 // big-endian high byte
 	v.vram[1] = 0x1F // big-endian low byte
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Check first pixel
-	fb := v.Framebuffer()
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 || fb[3] != 255 {
-		t.Errorf("pixel 0 = (%d,%d,%d,%d), want (255,0,0,255)", fb[0], fb[1], fb[2], fb[3])
+	fb := swr.framebuffer()
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 || fb[3] != 255 {
+		t.Errorf("pixel 0 = (%d,%d,%d,%d), want (248,0,0,255)", fb[0], fb[1], fb[2], fb[3])
 	}
 
 	// Check last active pixel
 	width := int(v.activeWidth)
 	height := int(v.activeLines)
 	lastOff := ((height-1)*width + (width - 1)) * 4
-	if fb[lastOff] != 255 || fb[lastOff+1] != 0 || fb[lastOff+2] != 0 || fb[lastOff+3] != 255 {
-		t.Errorf("last pixel = (%d,%d,%d,%d), want (255,0,0,255)",
+	if fb[lastOff] != 248 || fb[lastOff+1] != 0 || fb[lastOff+2] != 0 || fb[lastOff+3] != 255 {
+		t.Errorf("last pixel = (%d,%d,%d,%d), want (248,0,0,255)",
 			fb[lastOff], fb[lastOff+1], fb[lastOff+2], fb[lastOff+3])
 	}
 }
 
 func TestBackScreenSingleColorCustomAddress(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set BKTAU/BKTAL to point to address 0x1000 (byte addr = 0x1000 * 2 = 0x2000)
 	// BKTAL = 0x1000, BKTAU = 0x0000
@@ -138,16 +208,17 @@ func TestBackScreenSingleColorCustomAddress(t *testing.T) {
 	v.vram[0x2000] = 0x03 // big-endian high
 	v.vram[0x2001] = 0xE0 // big-endian low
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 || fb[3] != 255 {
-		t.Errorf("pixel 0 = (%d,%d,%d,%d), want (0,255,0,255)", fb[0], fb[1], fb[2], fb[3])
+	fb := swr.framebuffer()
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 || fb[3] != 255 {
+		t.Errorf("pixel 0 = (%d,%d,%d,%d), want (0,248,0,255)", fb[0], fb[1], fb[2], fb[3])
 	}
 }
 
 func TestBackScreenPerLine(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set per-line mode: BKCLMD=1 (bit 15 of BKTAU)
 	v.regs[vdp2BKTAU] = 0x8000
@@ -161,30 +232,31 @@ func TestBackScreenPerLine(t *testing.T) {
 	v.vram[2] = 0xFC
 	v.vram[3] = 0x00
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Line 0 should be red
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 || fb[3] != 255 {
-		t.Errorf("line 0 pixel = (%d,%d,%d,%d), want (255,0,0,255)", fb[0], fb[1], fb[2], fb[3])
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 || fb[3] != 255 {
+		t.Errorf("line 0 pixel = (%d,%d,%d,%d), want (248,0,0,255)", fb[0], fb[1], fb[2], fb[3])
 	}
 
 	// Line 1 should be blue
 	off := width * 4
-	if fb[off] != 0 || fb[off+1] != 0 || fb[off+2] != 255 || fb[off+3] != 255 {
-		t.Errorf("line 1 pixel = (%d,%d,%d,%d), want (0,0,255,255)",
+	if fb[off] != 0 || fb[off+1] != 0 || fb[off+2] != 248 || fb[off+3] != 255 {
+		t.Errorf("line 1 pixel = (%d,%d,%d,%d), want (0,0,248,255)",
 			fb[off], fb[off+1], fb[off+2], fb[off+3])
 	}
 }
 
 func TestBackScreenDefaultBlack(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 	height := int(v.activeLines)
 
@@ -201,6 +273,7 @@ func TestBackScreenDefaultBlack(t *testing.T) {
 
 func TestBackScreenActiveWidth352(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set HRESO bit 0 = 1 for 352 mode, DISP=1
 	v.Write(0x0000, 0x8001)
@@ -209,9 +282,9 @@ func TestBackScreenActiveWidth352(t *testing.T) {
 	v.vram[0] = 0xFF
 	v.vram[1] = 0xFF
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
 
 	if stride != 352*4 {
@@ -220,8 +293,8 @@ func TestBackScreenActiveWidth352(t *testing.T) {
 
 	// Check pixel at x=351, y=0 (last pixel of first row in 352 mode)
 	off := 351 * 4
-	if fb[off] != 255 || fb[off+1] != 255 || fb[off+2] != 255 || fb[off+3] != 255 {
-		t.Errorf("pixel (351,0) = (%d,%d,%d,%d), want (255,255,255,255)",
+	if fb[off] != 248 || fb[off+1] != 248 || fb[off+2] != 248 || fb[off+3] != 255 {
+		t.Errorf("pixel (351,0) = (%d,%d,%d,%d), want (248,248,248,255)",
 			fb[off], fb[off+1], fb[off+2], fb[off+3])
 	}
 }
@@ -282,9 +355,9 @@ func TestReadCellPixel4bpp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := v.readCellPixel4bpp(base, tt.x, tt.y)
-			if got != tt.expected {
-				t.Errorf("readCellPixel4bpp(%d,%d) = 0x%X, want 0x%X", tt.x, tt.y, got, tt.expected)
+			got := screen.CellDot4((*compute.VDP2VRAM)(v.vram), base, int32(tt.x), int32(tt.y))
+			if got != uint32(tt.expected) {
+				t.Errorf("CellDot4(%d,%d) = 0x%X, want 0x%X", tt.x, tt.y, got, tt.expected)
 			}
 		})
 	}
@@ -316,9 +389,9 @@ func TestReadCellPixel8bpp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := v.readCellPixel8bpp(base, tt.x, tt.y)
-			if got != tt.expected {
-				t.Errorf("readCellPixel8bpp(%d,%d) = 0x%02X, want 0x%02X", tt.x, tt.y, got, tt.expected)
+			got := screen.CellDot8((*compute.VDP2VRAM)(v.vram), base, int32(tt.x), int32(tt.y))
+			if got != uint32(tt.expected) {
+				t.Errorf("CellDot8(%d,%d) = 0x%02X, want 0x%02X", tt.x, tt.y, got, tt.expected)
 			}
 		})
 	}
@@ -332,7 +405,7 @@ func TestDecodePattern2Word(t *testing.T) {
 	msw := uint16(0x8055) // bit15=1(vflip), bit14=0(hflip), palette=0x55
 	lsw := uint16(0x3ABC) // charNum=0x3ABC
 
-	charNum, palette, hflip, vflip, _, _ := decodePattern2Word(msw, lsw)
+	charNum, palette, hflip, vflip, _, _ := screen.DecodePattern2Word(uint32(msw), uint32(lsw))
 
 	if charNum != 0x3ABC {
 		t.Errorf("charNum = 0x%X, want 0x3ABC", charNum)
@@ -351,7 +424,7 @@ func TestDecodePattern2Word(t *testing.T) {
 	msw2 := uint16(0x4012) // bit14=1(hflip), bit15=0(vflip), palette=0x12
 	lsw2 := uint16(0x0001)
 
-	charNum2, palette2, hflip2, vflip2, _, _ := decodePattern2Word(msw2, lsw2)
+	charNum2, palette2, hflip2, vflip2, _, _ := screen.DecodePattern2Word(uint32(msw2), uint32(lsw2))
 	if charNum2 != 1 {
 		t.Errorf("charNum = %d, want 1", charNum2)
 	}
@@ -379,7 +452,7 @@ func TestDecodePattern2WordSpecialBits(t *testing.T) {
 		{0xC000, false, false}, // VF+HF set, special bits clear
 	}
 	for i, tc := range tests {
-		_, _, _, _, sp, sc := decodePattern2Word(tc.msw, 0)
+		_, _, _, _, sp, sc := screen.DecodePattern2Word(uint32(tc.msw), 0)
 		if sp != tc.wantSpecPri || sc != tc.wantSpecCC {
 			t.Errorf("case %d: msw=0x%04X got specialPri=%v specialCC=%v, want %v %v",
 				i, tc.msw, sp, sc, tc.wantSpecPri, tc.wantSpecCC)
@@ -418,6 +491,7 @@ func TestSFCodeForScreen(t *testing.T) {
 
 func TestSFPRMDMode0Uniform(t *testing.T) {
 	v := setupNBG0_4bpp_2word(t)
+	swr := newSoftwareRenderer(v)
 	// SFPRMD = 0 for all screens (mode 0 = uniform from register)
 	v.regs[vdp2SFPRMD] = 0x0000
 	v.regs[vdp2PRINA] = 0x0005 // NBG0 priority = 5
@@ -433,10 +507,10 @@ func TestSFPRMDMode0Uniform(t *testing.T) {
 	v.cram[2] = 0x00
 	v.cram[3] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	// Check priority in layerBuf
-	px := v.layerBufs[0][0]
+	// Check priority in the layer buffer
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	pri := uint8(px >> 24)
 	if pri != 5 {
 		t.Errorf("mode 0 priority = %d, want 5", pri)
@@ -445,6 +519,7 @@ func TestSFPRMDMode0Uniform(t *testing.T) {
 
 func TestSFPRMDMode1PerCharacter2Word(t *testing.T) {
 	v := setupNBG0_4bpp_2word(t)
+	swr := newSoftwareRenderer(v)
 	// SFPRMD mode 1 for NBG0 (bits 1:0 = 01)
 	v.regs[vdp2SFPRMD] = 0x0001
 	v.regs[vdp2PRINA] = 0x0004 // NBG0 priority = 4 (binary 100)
@@ -458,9 +533,9 @@ func TestSFPRMDMode1PerCharacter2Word(t *testing.T) {
 	v.cram[2] = 0x00
 	v.cram[3] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	pri := uint8(px >> 24)
 	// Priority should be 4 with LSB replaced by 1 -> 5 (binary 101)
 	if pri != 5 {
@@ -469,9 +544,9 @@ func TestSFPRMDMode1PerCharacter2Word(t *testing.T) {
 
 	// Now test with specialPri=0
 	v.vram[0] = 0x00 // MSW: bit 13 clear
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	pri = uint8(px >> 24)
 	// Priority should be 4 with LSB forced to 0 -> 4 (binary 100)
 	if pri != 4 {
@@ -506,8 +581,8 @@ func TestSFCodeMatches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sfcodeMatches(tc.sfcode, tc.dot); got != tc.want {
-				t.Errorf("sfcodeMatches(0x%02X, 0x%02X) = %v, want %v", tc.sfcode, tc.dot, got, tc.want)
+			if got := screen.SFCodeMatches(uint32(tc.sfcode), uint32(tc.dot)); got != tc.want {
+				t.Errorf("SFCodeMatches(0x%02X, 0x%02X) = %v, want %v", tc.sfcode, tc.dot, got, tc.want)
 			}
 		})
 	}
@@ -515,6 +590,7 @@ func TestSFCodeMatches(t *testing.T) {
 
 func TestSFPRMDMode2PerDotMatch(t *testing.T) {
 	v := setupNBG0_4bpp_2word(t)
+	swr := newSoftwareRenderer(v)
 	// SFPRMD mode 2 for NBG0 (bits 1:0 = 10)
 	v.regs[vdp2SFPRMD] = 0x0002
 	v.regs[vdp2PRINA] = 0x0004  // priority = 4
@@ -535,18 +611,18 @@ func TestSFPRMDMode2PerDotMatch(t *testing.T) {
 	v.cram[4] = 0x03
 	v.cram[5] = 0xE0 // color 2 = green
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Pixel (0,0): special priority bit set and dot color 1 matches SFCODE
 	// -> LSB=1, priority 4|1 = 5
-	px0 := v.layerBufs[0][0]
+	px0 := renderedLayerDot(v, swr, 0, 0, 0)
 	pri0 := uint8(px0 >> 24)
 	if pri0 != 5 {
 		t.Errorf("dot=1 (match): priority = %d, want 5", pri0)
 	}
 
 	// Pixel (1,0) has dot color 2, no match -> LSB=0, priority 4&0xFE = 4
-	px1 := v.layerBufs[0][1]
+	px1 := renderedLayerDot(v, swr, 0, 1, 0)
 	pri1 := uint8(px1 >> 24)
 	if pri1 != 4 {
 		t.Errorf("dot=2 (no match): priority = %d, want 4", pri1)
@@ -556,14 +632,15 @@ func TestSFPRMDMode2PerDotMatch(t *testing.T) {
 	// matching dot: mode 2 requires both the special priority bit and the
 	// sfcode match (manual Table 11.2).
 	v.vram[0] = 0x00
-	renderTestFrame(v)
-	if pri := uint8(v.layerBufs[0][0] >> 24); pri != 4 {
+	renderTestFrame(v, swr)
+	if pri := uint8(renderedLayerDot(v, swr, 0, 0, 0) >> 24); pri != 4 {
 		t.Errorf("dot=1 match but special priority bit clear: priority = %d, want 4", pri)
 	}
 }
 
 func TestSFPRMDPriorityZeroBecomesTransparent(t *testing.T) {
 	v := setupNBG0_4bpp_2word(t)
+	swr := newSoftwareRenderer(v)
 	// SFPRMD mode 1 for NBG0
 	v.regs[vdp2SFPRMD] = 0x0001
 	v.regs[vdp2PRINA] = 0x0001 // priority = 1 (binary 001)
@@ -577,10 +654,10 @@ func TestSFPRMDPriorityZeroBecomesTransparent(t *testing.T) {
 	v.cram[2] = 0x00
 	v.cram[3] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Priority 1 with LSB=0 -> 0 -> transparent
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px != 0 {
 		t.Errorf("priority 0 should be transparent, got 0x%08X", px)
 	}
@@ -597,7 +674,7 @@ func TestDecodePattern1Word_16Color_Aux0(t *testing.T) {
 		pncnReg:     0x0260, // suppPalette=011 (bits 7-5), suppChar=00000 (bits 4-0)
 	}
 
-	charNum, palette, hflip, vflip := decodePattern1Word(pn, cfg.pncnReg, cfg.colorMode, cfg.auxMode1, cfg.charSize1x1)
+	charNum, palette, hflip, vflip := screen.DecodePattern1Word(uint32(pn), uint32(cfg.pncnReg), uint32(cfg.colorMode), cfg.auxMode1, !cfg.charSize1x1)
 
 	if charNum != 0x123 {
 		t.Errorf("charNum = 0x%X, want 0x123", charNum)
@@ -625,7 +702,7 @@ func TestDecodePattern1Word_16Color_Aux1(t *testing.T) {
 		pncnReg:     0x0078, // suppPalette=011 (bits 7-5=3), suppChar=11000 (bits 4-0=0x18)
 	}
 
-	charNum, palette, hflip, vflip := decodePattern1Word(pn, cfg.pncnReg, cfg.colorMode, cfg.auxMode1, cfg.charSize1x1)
+	charNum, palette, hflip, vflip := screen.DecodePattern1Word(uint32(pn), uint32(cfg.pncnReg), uint32(cfg.colorMode), cfg.auxMode1, !cfg.charSize1x1)
 
 	if charNum != 0x6BCD {
 		// charNum[11:0]=0xBCD, suppChar&0x1C=0x18, upper = 0x18>>2=6 shifted <<12 = 0x6000
@@ -655,7 +732,7 @@ func TestDecodePattern1Word_256Color_Aux1(t *testing.T) {
 		pncnReg:     0x0000, // no supplement additions
 	}
 
-	charNum, palette, hflip, vflip := decodePattern1Word(pn, cfg.pncnReg, cfg.colorMode, cfg.auxMode1, cfg.charSize1x1)
+	charNum, palette, hflip, vflip := screen.DecodePattern1Word(uint32(pn), uint32(cfg.pncnReg), uint32(cfg.colorMode), cfg.auxMode1, !cfg.charSize1x1)
 
 	if charNum != 0x234 {
 		t.Errorf("charNum = 0x%X, want 0x234", charNum)
@@ -683,14 +760,14 @@ func TestLookupColor_16Color(t *testing.T) {
 	v.cram[74] = uint8(val >> 8)
 	v.cram[75] = uint8(val)
 
-	r, g, b, transp := v.lookupColor(5, 2, 0, 0, false)
+	v.buildCRAMCache()
+	rgb, transp, _ := screen.PaletteDot(&v.palette, uint32(v.frame.cramMode), 5, 2, 0, 0, false)
 	if transp {
 		t.Error("should not be transparent")
 	}
 
-	er, eg, eb := rgb555ToRGB(val)
-	if r != er || g != eg || b != eb {
-		t.Errorf("color = (%d,%d,%d), want (%d,%d,%d)", r, g, b, er, eg, eb)
+	if want := screen.RGB555To888(uint32(val)); rgb != want {
+		t.Errorf("color = 0x%06X, want 0x%06X", rgb, want)
 	}
 }
 
@@ -703,12 +780,13 @@ func TestLookupColor_256Color(t *testing.T) {
 	v.cram[644] = uint8(val >> 8)
 	v.cram[645] = uint8(val)
 
-	r, g, b, transp := v.lookupColor(0x42, 0x10, 0, 1, false)
+	v.buildCRAMCache()
+	rgb, transp, _ := screen.PaletteDot(&v.palette, uint32(v.frame.cramMode), 0x42, 0x10, 0, 1, false)
 	if transp {
 		t.Error("should not be transparent")
 	}
-	if r != 0 || g != 0 || b != 255 {
-		t.Errorf("color = (%d,%d,%d), want (0,0,255)", r, g, b)
+	if rgb != 0xF80000 {
+		t.Errorf("color = 0x%06X, want 0xF80000 (blue)", rgb)
 	}
 }
 
@@ -721,19 +799,21 @@ func TestLookupColor_CRAMOffset(t *testing.T) {
 	v.cram[514] = uint8(val >> 8)
 	v.cram[515] = uint8(val)
 
-	r, g, b, transp := v.lookupColor(1, 0, 1, 0, false)
+	v.buildCRAMCache()
+	rgb, transp, _ := screen.PaletteDot(&v.palette, uint32(v.frame.cramMode), 1, 0, 1, 0, false)
 	if transp {
 		t.Error("should not be transparent")
 	}
-	if r != 255 || g != 0 || b != 0 {
-		t.Errorf("color = (%d,%d,%d), want (255,0,0)", r, g, b)
+	if rgb != 0x0000F8 {
+		t.Errorf("color = 0x%06X, want 0x0000F8 (red)", rgb)
 	}
 }
 
 func TestLookupColor_Transparent(t *testing.T) {
 	v := newTestVDP2()
 
-	_, _, _, transp := v.lookupColor(0, 0, 0, 0, false)
+	v.buildCRAMCache()
+	_, transp, _ := screen.PaletteDot(&v.palette, uint32(v.frame.cramMode), 0, 0, 0, 0, false)
 	if !transp {
 		t.Error("dotColor=0 should be transparent")
 	}
@@ -748,12 +828,13 @@ func TestLookupColor_TranspOff(t *testing.T) {
 	v.cram[0] = uint8(val >> 8)
 	v.cram[1] = uint8(val)
 
-	r, g, b, transp := v.lookupColor(0, 0, 0, 0, true)
+	v.buildCRAMCache()
+	rgb, transp, _ := screen.PaletteDot(&v.palette, uint32(v.frame.cramMode), 0, 0, 0, 0, true)
 	if transp {
 		t.Error("should not be transparent when transpOff=true")
 	}
-	if r != 0 || g != 255 || b != 0 {
-		t.Errorf("color = (%d,%d,%d), want (0,255,0)", r, g, b)
+	if rgb != 0x00F800 {
+		t.Errorf("color = 0x%06X, want 0x00F800", rgb)
 	}
 }
 
@@ -808,23 +889,23 @@ func TestRenderNBG_SingleTile(t *testing.T) {
 	v.cram[38] = 0x00
 	v.cram[39] = 0x1F
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
-	// Pixel (0,0) should have priority=1, R=255, G=0, B=0
+	// Pixel (0,0) should have priority=1, R=248, G=0, B=0
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("pixel (0,0) should not be transparent")
 	}
 	pri := uint8(px >> 24)
-	r := uint8(px >> 16)
-	g := uint8(px >> 8)
-	b := uint8(px)
+	r := uint8(screen.ColorR(px))
+	g := uint8(screen.ColorG(px))
+	b := uint8(screen.ColorB(px))
 	if pri != 1 {
 		t.Errorf("priority = %d, want 1", pri)
 	}
-	if r != 255 || g != 0 || b != 0 {
-		t.Errorf("color = (%d,%d,%d), want (255,0,0)", r, g, b)
+	if r != 248 || g != 0 || b != 0 {
+		t.Errorf("color = (%d,%d,%d), want (248,0,0)", r, g, b)
 	}
 
 	// Pixel (0,1) in second row - cell data is 0 -> transparent
@@ -859,7 +940,7 @@ func TestRenderNBG_Scroll(t *testing.T) {
 	v.cram[42] = 0x03
 	v.cram[43] = 0xE0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// With scrollX=8, screen pixel (0,0) maps to map pixel (8,0) = cell (1,0) dot (0,0)
@@ -867,9 +948,9 @@ func TestRenderNBG_Scroll(t *testing.T) {
 	if px == 0 {
 		t.Fatal("pixel (0,0) after scroll should not be transparent")
 	}
-	g := uint8(px >> 8)
-	if g != 255 {
-		t.Errorf("green = %d, want 255", g)
+	g := uint8(screen.ColorG(px))
+	if g != 248 {
+		t.Errorf("green = %d, want 248", g)
 	}
 }
 
@@ -892,7 +973,7 @@ func TestRenderNBG_Flip(t *testing.T) {
 	v.cram[52] = 0x00
 	v.cram[53] = 0x1F // red
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// With both flips, dot(0,0) of the cell maps to screen pixel (7,7) of the tile
@@ -901,9 +982,9 @@ func TestRenderNBG_Flip(t *testing.T) {
 	if px77 == 0 {
 		t.Fatal("pixel (7,7) should show the flipped dot")
 	}
-	r := uint8(px77 >> 16)
-	if r != 255 {
-		t.Errorf("pixel (7,7) red = %d, want 255", r)
+	r := uint8(screen.ColorR(px77))
+	if r != 248 {
+		t.Errorf("pixel (7,7) red = %d, want 248", r)
 	}
 
 	// Screen pixel (0,0) -> dotX=7-0=7, dotY=7-0=7 -> reads dot(7,7) = 0 -> transparent
@@ -917,6 +998,7 @@ func TestRenderNBG_Flip(t *testing.T) {
 
 func TestComposite_SingleLayer(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 with priority 1. Back screen reads VRAM address 0,
 	// which is zeroed: black.
@@ -924,11 +1006,11 @@ func TestComposite_SingleLayer(t *testing.T) {
 	v.regs[vdp2PRINA] = 0x0001
 
 	// Put a non-transparent pixel in NBG0's layer buffer at position (0,0)
-	v.layerBufs[0][0] = 1<<24 | 128<<16 | 64<<8 | 32
+	swr.in.Layers[0][0] = 1<<24 | screen.PackColor(128, 64, 32)
 
-	compositeTestFrame(v)
+	compositeTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	if fb[0] != 128 || fb[1] != 64 || fb[2] != 32 || fb[3] != 0xFF {
 		t.Errorf("pixel = (%d,%d,%d,%d), want (128,64,32,255)", fb[0], fb[1], fb[2], fb[3])
 	}
@@ -936,18 +1018,19 @@ func TestComposite_SingleLayer(t *testing.T) {
 
 func TestComposite_PriorityOrder(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 (priority 1) and NBG1 (priority 2)
 	v.regs[vdp2BGON] = 0x0003
 	v.regs[vdp2PRINA] = 0x0201 // NBG0=1, NBG1=2
 
 	// Both layers have a pixel at (0,0)
-	v.layerBufs[0][0] = 1<<24 | 255<<16 // NBG0: red, priority 1
-	v.layerBufs[1][0] = 2<<24 | 255<<8  // NBG1: green, priority 2
+	swr.in.Layers[0][0] = 1<<24 | screen.PackColor(255, 0, 0) // NBG0: red, priority 1
+	swr.in.Layers[1][0] = 2<<24 | screen.PackColor(0, 255, 0) // NBG1: green, priority 2
 
-	compositeTestFrame(v)
+	compositeTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// NBG1 (priority 2) should be drawn on top of NBG0 (priority 1)
 	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
 		t.Errorf("pixel = (%d,%d,%d), want (0,255,0) - higher priority wins", fb[0], fb[1], fb[2])
@@ -956,6 +1039,7 @@ func TestComposite_PriorityOrder(t *testing.T) {
 
 func TestComposite_Transparency(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 (priority 1) and NBG1 (priority 2)
 	v.regs[vdp2BGON] = 0x0003
@@ -966,13 +1050,13 @@ func TestComposite_Transparency(t *testing.T) {
 	v.vram[1] = 0x00
 
 	// NBG0 has red at (0,0)
-	v.layerBufs[0][0] = 1<<24 | 255<<16
+	swr.in.Layers[0][0] = 1<<24 | screen.PackColor(255, 0, 0)
 	// NBG1 is transparent at (0,0)
-	v.layerBufs[1][0] = 0
+	swr.in.Layers[1][0] = 0
 
-	compositeTestFrame(v)
+	compositeTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// NBG0 red should show through NBG1's transparent pixel
 	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
 		t.Errorf("pixel = (%d,%d,%d), want (255,0,0) - lower priority shows through", fb[0], fb[1], fb[2])
@@ -981,25 +1065,26 @@ func TestComposite_Transparency(t *testing.T) {
 
 func TestComposite_PriorityZero(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 but set priority to 0
 	v.regs[vdp2BGON] = 0x0001
 	v.regs[vdp2PRINA] = 0x0000
 
 	// Put a pixel in the layer buffer
-	v.layerBufs[0][0] = 0<<24 | 255<<16
+	swr.in.Layers[0][0] = 0<<24 | screen.PackColor(255, 0, 0)
 
 	// Fill back screen with green
 	val := uint16(0x83E0)
 	v.vram[0] = uint8(val >> 8)
 	v.vram[1] = uint8(val)
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// Priority 0 layer should not be displayed, back screen green shows
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want (0,255,0) - priority 0 hidden", fb[0], fb[1], fb[2])
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want (0,248,0) - priority 0 hidden", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -1007,6 +1092,7 @@ func TestComposite_PriorityZero(t *testing.T) {
 
 func TestBIOSConfig(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set registers matching BIOS state
 	v.regs[vdp2BGON] = 0x000F   // NBG0-3 enabled
@@ -1037,7 +1123,7 @@ func TestBIOSConfig(t *testing.T) {
 	v.regs[vdp2PRINB] = 0x0403 // NBG2=3, NBG3=4
 
 	// Frame boundary: EndFrame captures SCYN to seed the vertical
-	// counters for the next frame's render.
+	// counters for the next frame's rendering.
 	v.EndFrame()
 
 	// Verify config decode for each screen
@@ -1138,12 +1224,12 @@ func TestBIOSConfig(t *testing.T) {
 	v.cram[46] = 0x7F
 	v.cram[47] = 0xFF
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Pixel (0,0) should show NBG0's tile: white
-	fb := v.Framebuffer()
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 255 {
-		t.Errorf("BIOS config pixel (0,0) = (%d,%d,%d), want (255,255,255)", fb[0], fb[1], fb[2])
+	fb := swr.framebuffer()
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 248 {
+		t.Errorf("BIOS config pixel (0,0) = (%d,%d,%d), want (248,248,248)", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -1202,7 +1288,7 @@ func TestRenderNBG_2x2CharSize(t *testing.T) {
 	v.cram[40] = 0x7F
 	v.cram[41] = 0xFF // white
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	width := 320
@@ -1212,32 +1298,32 @@ func TestRenderNBG_2x2CharSize(t *testing.T) {
 	if px00 == 0 {
 		t.Fatal("pixel (0,0) should not be transparent")
 	}
-	r := uint8(px00 >> 16)
-	if r != 255 {
-		t.Errorf("TL pixel (0,0) R=%d, want 255 (red)", r)
+	r := uint8(screen.ColorR(px00))
+	if r != 248 {
+		t.Errorf("TL pixel (0,0) R=%d, want 248 (red)", r)
 	}
 
 	// Pixel (8,0) = TR cell, dot=2 -> green
 	px80 := buf[8]
-	g := uint8(px80 >> 8)
-	if g != 255 {
-		t.Errorf("TR pixel (8,0) G=%d, want 255 (green)", g)
+	g := uint8(screen.ColorG(px80))
+	if g != 248 {
+		t.Errorf("TR pixel (8,0) G=%d, want 248 (green)", g)
 	}
 
 	// Pixel (0,8) = BL cell, dot=3 -> blue
 	px08 := buf[8*width]
-	b := uint8(px08)
-	if b != 255 {
-		t.Errorf("BL pixel (0,8) B=%d, want 255 (blue)", b)
+	b := uint8(screen.ColorB(px08))
+	if b != 248 {
+		t.Errorf("BL pixel (0,8) B=%d, want 248 (blue)", b)
 	}
 
 	// Pixel (8,8) = BR cell, dot=4 -> white
 	px88 := buf[8*width+8]
-	r88 := uint8(px88 >> 16)
-	g88 := uint8(px88 >> 8)
-	b88 := uint8(px88)
-	if r88 != 255 || g88 != 255 || b88 != 255 {
-		t.Errorf("BR pixel (8,8) = (%d,%d,%d), want (255,255,255)", r88, g88, b88)
+	r88 := uint8(screen.ColorR(px88))
+	g88 := uint8(screen.ColorG(px88))
+	b88 := uint8(screen.ColorB(px88))
+	if r88 != 248 || g88 != 248 || b88 != 248 {
+		t.Errorf("BR pixel (8,8) = (%d,%d,%d), want (248,248,248)", r88, g88, b88)
 	}
 }
 
@@ -1275,21 +1361,21 @@ func TestRenderNBG_2x2CharFlip(t *testing.T) {
 	v.cram[36] = 0x03
 	v.cram[37] = 0xE0 // color 2 = green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// With hflip: TL and TR swap. Pixel (0,0) should be TR cell (dot=2 -> green)
 	px00 := buf[0]
-	g := uint8(px00 >> 8)
-	if g != 255 {
-		t.Errorf("hflip pixel (0,0) G=%d, want 255 (green = TR cell)", g)
+	g := uint8(screen.ColorG(px00))
+	if g != 248 {
+		t.Errorf("hflip pixel (0,0) G=%d, want 248 (green = TR cell)", g)
 	}
 
 	// Pixel (8,0) should be TL cell (dot=1 -> red)
 	px80 := buf[8]
-	r := uint8(px80 >> 16)
-	if r != 255 {
-		t.Errorf("hflip pixel (8,0) R=%d, want 255 (red = TL cell)", r)
+	r := uint8(screen.ColorR(px80))
+	if r != 248 {
+		t.Errorf("hflip pixel (8,0) R=%d, want 248 (red = TL cell)", r)
 	}
 }
 
@@ -1317,7 +1403,7 @@ func TestRenderNBG_Bitmap256Color(t *testing.T) {
 	v.cram[20] = 0x03
 	v.cram[21] = 0xE0 // green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// Pixel (0,0): dot=5 -> red
@@ -1325,16 +1411,16 @@ func TestRenderNBG_Bitmap256Color(t *testing.T) {
 	if px == 0 {
 		t.Fatal("bitmap pixel (0,0) should not be transparent")
 	}
-	rr := uint8(px >> 16)
-	if rr != 255 {
-		t.Errorf("bitmap px(0,0) R=%d, want 255 (red)", rr)
+	rr := uint8(screen.ColorR(px))
+	if rr != 248 {
+		t.Errorf("bitmap px(0,0) R=%d, want 248 (red)", rr)
 	}
 
 	// Pixel (1,0): dot=10 -> green
 	px1 := buf[1]
-	gg := uint8(px1 >> 8)
-	if gg != 255 {
-		t.Errorf("bitmap px(1,0) G=%d, want 255 (green)", gg)
+	gg := uint8(screen.ColorG(px1))
+	if gg != 248 {
+		t.Errorf("bitmap px(1,0) G=%d, want 248 (green)", gg)
 	}
 
 	// Pixel (2,0): dot=0 -> transparent (default VRAM is 0)
@@ -1367,7 +1453,7 @@ func TestRenderNBG_Bitmap16Color(t *testing.T) {
 	v.cram[261*2] = 0x7C
 	v.cram[261*2+1] = 0x00 // blue
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// Pixel (0,0): dot=3 -> red
@@ -1375,16 +1461,16 @@ func TestRenderNBG_Bitmap16Color(t *testing.T) {
 	if px == 0 {
 		t.Fatal("bitmap 4bpp pixel (0,0) should not be transparent")
 	}
-	rr := uint8(px >> 16)
-	if rr != 255 {
-		t.Errorf("bitmap 4bpp px(0,0) R=%d, want 255", rr)
+	rr := uint8(screen.ColorR(px))
+	if rr != 248 {
+		t.Errorf("bitmap 4bpp px(0,0) R=%d, want 248", rr)
 	}
 
 	// Pixel (1,0): dot=5 -> blue
 	px1 := buf[1]
-	bb := uint8(px1)
-	if bb != 255 {
-		t.Errorf("bitmap 4bpp px(1,0) B=%d, want 255", bb)
+	bb := uint8(screen.ColorB(px1))
+	if bb != 248 {
+		t.Errorf("bitmap 4bpp px(1,0) B=%d, want 248", bb)
 	}
 }
 
@@ -1473,14 +1559,14 @@ func TestRenderNBG0_Bitmap16Color_NoSpecialBitBleed(t *testing.T) {
 	v.cram[7*2] = 0x7C
 	v.cram[7*2+1] = 0x00 // blue at index 7
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
-	if rr := uint8(buf[0] >> 16); rr != 255 {
-		t.Errorf("special bits bleed into palette: px(0,0) R=%d, want 255", rr)
+	if rr := uint8(screen.ColorR(buf[0])); rr != 248 {
+		t.Errorf("special bits bleed into palette: px(0,0) R=%d, want 248", rr)
 	}
-	if bb := uint8(buf[1]); bb != 255 {
-		t.Errorf("special bits bleed into palette: px(1,0) B=%d, want 255", bb)
+	if bb := uint8(screen.ColorB(buf[1])); bb != 248 {
+		t.Errorf("special bits bleed into palette: px(1,0) B=%d, want 248", bb)
 	}
 }
 
@@ -1507,21 +1593,21 @@ func TestRenderNBG_BitmapScroll(t *testing.T) {
 	v.cram[8*2] = 0x03
 	v.cram[8*2+1] = 0xE0 // color 8 = green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// Screen pixel (0,0) = bitmap (510,0) -> red
 	px0 := buf[0]
-	rr := uint8(px0 >> 16)
-	if rr != 255 {
-		t.Errorf("scroll px(0,0) R=%d, want 255 (red)", rr)
+	rr := uint8(screen.ColorR(px0))
+	if rr != 248 {
+		t.Errorf("scroll px(0,0) R=%d, want 248 (red)", rr)
 	}
 
 	// Screen pixel (2,0) = bitmap (512 mod 512 = 0, 0) -> green
 	px2 := buf[2]
-	gg := uint8(px2 >> 8)
-	if gg != 255 {
-		t.Errorf("scroll px(2,0) G=%d, want 255 (green)", gg)
+	gg := uint8(screen.ColorG(px2))
+	if gg != 248 {
+		t.Errorf("scroll px(2,0) G=%d, want 248 (green)", gg)
 	}
 }
 
@@ -1555,16 +1641,16 @@ func TestRenderNBG_2048Color(t *testing.T) {
 	v.cram[200] = 0x00
 	v.cram[201] = 0x1F // red
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("2048-color pixel (0,0) should not be transparent")
 	}
-	rr := uint8(px >> 16)
-	if rr != 255 {
-		t.Errorf("2048-color px(0,0) R=%d, want 255", rr)
+	rr := uint8(screen.ColorR(px))
+	if rr != 248 {
+		t.Errorf("2048-color px(0,0) R=%d, want 248", rr)
 	}
 }
 
@@ -1592,16 +1678,16 @@ func TestRenderNBG_32KColor(t *testing.T) {
 	v.vram[0x20] = 0x83
 	v.vram[0x21] = 0xE0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("32K-color pixel (0,0) should not be transparent")
 	}
-	gg := uint8(px >> 8)
-	if gg != 255 {
-		t.Errorf("32K-color px(0,0) G=%d, want 255", gg)
+	gg := uint8(screen.ColorG(px))
+	if gg != 248 {
+		t.Errorf("32K-color px(0,0) G=%d, want 248", gg)
 	}
 }
 
@@ -1625,7 +1711,7 @@ func TestRenderNBG_32KColorTransparent(t *testing.T) {
 	v.vram[0x20] = 0x00
 	v.vram[0x21] = 0x00
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	if buf[0] != 0 {
@@ -1691,16 +1777,16 @@ func TestCRAMMode1_2048Entries(t *testing.T) {
 	v.WriteCRAM(2580, 0x7C) // blue
 	v.WriteCRAM(2581, 0x00)
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("mode 1 pixel should not be transparent")
 	}
-	bb := uint8(px)
-	if bb != 255 {
-		t.Errorf("mode 1 pixel B=%d, want 255", bb)
+	bb := uint8(screen.ColorB(px))
+	if bb != 248 {
+		t.Errorf("mode 1 pixel B=%d, want 248", bb)
 	}
 }
 
@@ -1737,16 +1823,16 @@ func TestCRAMMode2_RGB888(t *testing.T) {
 	v.cram[14] = 0x80 // Green=0x80
 	v.cram[15] = 0xC0 // Red=0xC0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("mode 2 pixel should not be transparent")
 	}
-	rr := uint8(px >> 16)
-	gg := uint8(px >> 8)
-	bb := uint8(px)
+	rr := uint8(screen.ColorR(px))
+	gg := uint8(screen.ColorG(px))
+	bb := uint8(screen.ColorB(px))
 	if rr != 0xC0 {
 		t.Errorf("mode 2 R=0x%02X, want 0xC0", rr)
 	}
@@ -1806,16 +1892,16 @@ func TestRenderNBG_PlaneSize2x1(t *testing.T) {
 
 	// Scroll to x=0: pixel (0,0) should come from page 0 cell (0,0)
 	v.regs[vdp2SCXIN0] = 0
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px0 := buf[0]
 	if px0 == 0 {
 		t.Fatal("page 0 pixel should not be transparent")
 	}
-	r0 := uint8(px0 >> 16)
-	if r0 != 255 {
-		t.Errorf("page 0 pixel R=%d, want 255 (red)", r0)
+	r0 := uint8(screen.ColorR(px0))
+	if r0 != 248 {
+		t.Errorf("page 0 pixel R=%d, want 248 (red)", r0)
 	}
 
 	// Scroll to x=512: pixel (0,0) should come from page 1 cell (0,0)
@@ -1826,9 +1912,9 @@ func TestRenderNBG_PlaneSize2x1(t *testing.T) {
 	if px1 == 0 {
 		t.Fatal("page 1 pixel should not be transparent")
 	}
-	g1 := uint8(px1 >> 8)
-	if g1 != 255 {
-		t.Errorf("page 1 pixel G=%d, want 255 (green)", g1)
+	g1 := uint8(screen.ColorG(px1))
+	if g1 != 248 {
+		t.Errorf("page 1 pixel G=%d, want 248 (green)", g1)
 	}
 }
 
@@ -1868,16 +1954,16 @@ func TestRenderNBG_PlaneSize2x2(t *testing.T) {
 	v.regs[vdp2SCYIN0] = 512
 	v.EndFrame()
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	px := buf[0]
 	if px == 0 {
 		t.Fatal("page 3 (BR) pixel should not be transparent")
 	}
-	bb := uint8(px)
-	if bb != 255 {
-		t.Errorf("page 3 pixel B=%d, want 255 (blue)", bb)
+	bb := uint8(screen.ColorB(px))
+	if bb != 248 {
+		t.Errorf("page 3 pixel B=%d, want 248 (blue)", bb)
 	}
 }
 
@@ -1976,16 +2062,16 @@ func TestRenderNBG_ZoomOut2x(t *testing.T) {
 	v.cram[11*2] = 0x03
 	v.cram[11*2+1] = 0xE0 // green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// With 2x zoom out: screen pixel 0 maps to source X=0 (dot 10 -> red)
 	// Screen pixel 1 maps to source X=2 (dot 12)
 	// So pixel 0 and pixel 1 should show different source columns
 	px0 := buf[0]
-	r0 := uint8(px0 >> 16)
-	if r0 != 255 {
-		t.Errorf("zoom 2x px(0,0) R=%d, want 255 (red=dot 10)", r0)
+	r0 := uint8(screen.ColorR(px0))
+	if r0 != 248 {
+		t.Errorf("zoom 2x px(0,0) R=%d, want 248 (red=dot 10)", r0)
 	}
 
 	// Screen pixel 1: source X = 1*2 = 2, dot=12
@@ -2028,7 +2114,7 @@ func TestRenderNBG_ZoomIn(t *testing.T) {
 	v.cram[11*2] = 0x03
 	v.cram[11*2+1] = 0xE0 // green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// With 0.5 increment: screen pixel 0 -> source X=0 (dot 10)
@@ -2043,9 +2129,9 @@ func TestRenderNBG_ZoomIn(t *testing.T) {
 
 	// Pixel 2 should be different (source X=1, dot 11=green)
 	px2 := buf[2]
-	g2 := uint8(px2 >> 8)
-	if g2 != 255 {
-		t.Errorf("zoom 0.5x: pixel 2 G=%d, want 255 (green=dot 11)", g2)
+	g2 := uint8(screen.ColorG(px2))
+	if g2 != 248 {
+		t.Errorf("zoom 0.5x: pixel 2 G=%d, want 248 (green=dot 11)", g2)
 	}
 }
 
@@ -2083,13 +2169,13 @@ func TestRenderNBG_ZoomZeroCollapses(t *testing.T) {
 	v.cram[11*2], v.cram[11*2+1] = 0x03, 0xE0 // green
 	v.cram[12*2], v.cram[12*2+1] = 0x7C, 0x00 // blue
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	w := v.frame.width
 
 	// Origin dot is red.
-	if r := uint8(buf[0] >> 16); r != 255 {
-		t.Errorf("origin px(0,0) R=%d, want 255 (red=dot 10)", r)
+	if r := uint8(screen.ColorR(buf[0])); r != 248 {
+		t.Errorf("origin px(0,0) R=%d, want 248 (red=dot 10)", r)
 	}
 	// Horizontal collapse: px(1,0) samples the origin too, not dot 11.
 	if buf[1] != buf[0] {
@@ -2124,7 +2210,7 @@ func TestRenderNBG_ZoomZeroTransparentOrigin(t *testing.T) {
 	v.vram[0x20+1] = 10 // (col1,row0) visible, but never sampled
 	v.cram[10*2], v.cram[10*2+1] = 0x00, 0x1F
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	w := v.frame.width
 
@@ -2164,15 +2250,15 @@ func TestRenderNBG_FractionalScroll(t *testing.T) {
 	v.cram[11*2] = 0x03
 	v.cram[11*2+1] = 0xE0 // green (dot 11)
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// scrollXFP = 1*256 + 128 = 384. Screen pixel 0: sxFP = 384 + 0*256 = 384.
 	// sx = 384 >> 8 = 1. Source column 1 -> dot 11 (green)
 	px0 := buf[0]
-	g0 := uint8(px0 >> 8)
-	if g0 != 255 {
-		t.Errorf("fractional scroll px(0,0) G=%d, want 255 (green=dot 11 at source X=1)", g0)
+	g0 := uint8(screen.ColorG(px0))
+	if g0 != 248 {
+		t.Errorf("fractional scroll px(0,0) G=%d, want 248 (green=dot 11 at source X=1)", g0)
 	}
 }
 
@@ -2212,7 +2298,7 @@ func TestRenderNBG_Mosaic(t *testing.T) {
 	v.cram[20*2] = 0x03
 	v.cram[20*2+1] = 0xE0 // green
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	width := 320
@@ -2226,24 +2312,24 @@ func TestRenderNBG_Mosaic(t *testing.T) {
 		t.Errorf("mosaic 4x4 block should be uniform: (0,0)=%08X (3,0)=%08X (0,3)=%08X (3,3)=%08X",
 			px00, px30, px03, px33)
 	}
-	r := uint8(px00 >> 16)
-	if r != 255 {
-		t.Errorf("mosaic block (0,0) R=%d, want 255 (red)", r)
+	r := uint8(screen.ColorR(px00))
+	if r != 248 {
+		t.Errorf("mosaic block (0,0) R=%d, want 248 (red)", r)
 	}
 
 	// Pixels (0,4)-(3,7) sample from (0,4) -> row 4 -> green
 	px04 := buf[4*width]
-	g := uint8(px04 >> 8)
-	if g != 255 {
-		t.Errorf("mosaic block (0,4) G=%d, want 255 (green)", g)
+	g := uint8(screen.ColorG(px04))
+	if g != 248 {
+		t.Errorf("mosaic block (0,4) G=%d, want 248 (green)", g)
 	}
 
 	// Pixel (4,0) starts a new horizontal block -> still row 0, col 4
 	// Same row 0, different column but same row -> still red (all row 0 is dot=10)
 	px40 := buf[4]
-	r40 := uint8(px40 >> 16)
-	if r40 != 255 {
-		t.Errorf("mosaic block (4,0) R=%d, want 255 (red)", r40)
+	r40 := uint8(screen.ColorR(px40))
+	if r40 != 248 {
+		t.Errorf("mosaic block (4,0) R=%d, want 248 (red)", r40)
 	}
 }
 
@@ -2301,36 +2387,39 @@ func TestSpritePriorityAboveNBG(t *testing.T) {
 	// Sprite pixel: PR=0 (b15-14=00), DC=5 -> pixel value 0x0005
 	// Sprite priority register 0 = 5. NBG0 priority = 3.
 	v, fbView := setupSpriteAndNBG0(t, 0x0005, 5, 3)
-	renderTestFrameFB(v, fbView)
+	swr := newSoftwareRenderer(v)
+	renderTestFrameFB(v, swr, fbView)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// Sprite (red, priority 5) should be on top of NBG0 (green, priority 3)
-	if fb[0] != 255 || fb[1] != 0 {
-		t.Errorf("sprite above NBG: pixel = (%d,%d,%d), want red (255,0,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 0 {
+		t.Errorf("sprite above NBG: pixel = (%d,%d,%d), want red (248,0,0)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestSpritePriorityBelowNBG(t *testing.T) {
 	// Sprite priority reg 0 = 1, NBG0 priority = 5
 	v, fbView := setupSpriteAndNBG0(t, 0x0005, 1, 5)
-	renderTestFrameFB(v, fbView)
+	swr := newSoftwareRenderer(v)
+	renderTestFrameFB(v, swr, fbView)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// NBG0 (green, priority 5) should be on top of sprite (red, priority 1)
-	if fb[0] != 0 || fb[1] != 255 {
-		t.Errorf("sprite below NBG: pixel = (%d,%d,%d), want green (0,255,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 0 || fb[1] != 248 {
+		t.Errorf("sprite below NBG: pixel = (%d,%d,%d), want green (0,248,0)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestSpritePriorityEqual(t *testing.T) {
 	// Sprite priority reg 0 = 3, NBG0 priority = 3. Sprite wins on tie.
 	v, fbView := setupSpriteAndNBG0(t, 0x0005, 3, 3)
-	renderTestFrameFB(v, fbView)
+	swr := newSoftwareRenderer(v)
+	renderTestFrameFB(v, swr, fbView)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// Sprite wins on equal priority (default order: Sprite > NBG0)
-	if fb[0] != 255 || fb[1] != 0 {
-		t.Errorf("sprite equal priority: pixel = (%d,%d,%d), want red (255,0,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 0 {
+		t.Errorf("sprite equal priority: pixel = (%d,%d,%d), want red (248,0,0)", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -2363,7 +2452,7 @@ func setupTwoNBGLayers(t *testing.T, priNBG0, priNBG1 uint8) *VDP2 {
 		v.vram[0x20+i] = 10
 	}
 	v.cram[10*2] = 0x03
-	v.cram[10*2+1] = 0xE0 // green = (0, 255, 0)
+	v.cram[10*2+1] = 0xE0 // green = (0, 248, 0)
 
 	// NBG1 PND at page 4 (0x10000): charNum=2
 	v.vram[0x10000] = 0x00
@@ -2374,7 +2463,7 @@ func setupTwoNBGLayers(t *testing.T, priNBG0, priNBG1 uint8) *VDP2 {
 		v.vram[0x80+i] = 20
 	}
 	v.cram[20*2] = 0x00
-	v.cram[20*2+1] = 0x1F // red = (255, 0, 0)
+	v.cram[20*2+1] = 0x1F // red = (248, 0, 0)
 
 	return v
 }
@@ -2383,52 +2472,54 @@ func TestColorCalcRatioBlend(t *testing.T) {
 	// NBG0 (green, priority 5) on top, NBG1 (red, priority 3) second.
 	// CC enabled for NBG0, ratio=16 (50%).
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio = 16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// Expected: green*(32-16)/32 + red*16/32 = green*0.5 + red*0.5
-	// Green = (0,255,0)*0.5 = (0,127,0)
-	// PDF ratio 16: Green*15/32 + Red*17/32 = (135,119,0)
+	// PDF ratio 16: Green*15/32 + Red*17/32
+	// R = 248*17/32 = 131, G = 248*15/32 = 116 -> (131,116,0)
 	r := fb[0]
 	g := fb[1]
 	b := fb[2]
-	if r < 134 || r > 136 || g < 118 || g > 120 || b != 0 {
-		t.Errorf("ratio blend pixel = (%d,%d,%d), want ~(135,119,0)", r, g, b)
+	if r < 130 || r > 132 || g < 115 || g > 117 || b != 0 {
+		t.Errorf("ratio blend pixel = (%d,%d,%d), want ~(131,116,0)", r, g, b)
 	}
 }
 
 func TestColorCalcAddAsIs(t *testing.T) {
 	// Same setup, but CCMD=1 (add as-is, no ratio)
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0101 // CCMD=1 (bit 8), N0CCEN=1
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// Expected: green + red = (0+255, 255+0, 0+0) = (255, 255, 0), clamped
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("add-as-is pixel = (%d,%d,%d), want (255,255,0)", fb[0], fb[1], fb[2])
+	// Expected: green + red = (0+248, 248+0, 0+0) = (248, 248, 0)
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("add-as-is pixel = (%d,%d,%d), want (248,248,0)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestColorCalcDisabled(t *testing.T) {
 	// CC not enabled for top layer - no blending
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0000 // no CC enabled
 	v.regs[vdp2CCRNA] = 16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// Should show top layer (NBG0 = green) without blending
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("CC disabled pixel = (%d,%d,%d), want green (0,255,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("CC disabled pixel = (%d,%d,%d), want green (0,248,0)", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -2436,6 +2527,7 @@ func TestColorCalcDisabled(t *testing.T) {
 
 func TestColorOffsetA(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// NBG0 with green tile, priority 1
 	v.regs[vdp2BGON] = 0x0001
@@ -2452,7 +2544,7 @@ func TestColorOffsetA(t *testing.T) {
 	for i := 0; i < 64; i++ {
 		v.vram[0x20+i] = 10
 	}
-	// Green = (0, 255, 0) via CRAM
+	// Green = (0, 248, 0) via CRAM
 	v.cram[10*2] = 0x03
 	v.cram[10*2+1] = 0xE0
 
@@ -2463,15 +2555,15 @@ func TestColorOffsetA(t *testing.T) {
 	v.regs[vdp2COAG] = 0        // G offset = 0
 	v.regs[vdp2COAB] = 50       // B offset = +50
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// Green (0,255,0) + offset (+100, 0, +50) = (100, 255, 50)
+	// Green (0,248,0) + offset (+100, 0, +50) = (100, 248, 50)
 	if fb[0] != 100 {
 		t.Errorf("offset A R=%d, want 100", fb[0])
 	}
-	if fb[1] != 255 {
-		t.Errorf("offset A G=%d, want 255", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("offset A G=%d, want 248", fb[1])
 	}
 	if fb[2] != 50 {
 		t.Errorf("offset A B=%d, want 50", fb[2])
@@ -2480,6 +2572,7 @@ func TestColorOffsetA(t *testing.T) {
 
 func TestColorOffsetB(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2BGON] = 0x0001
 	v.regs[vdp2CHCTLA] = 0x0010
@@ -2506,10 +2599,10 @@ func TestColorOffsetB(t *testing.T) {
 	v.regs[vdp2COBG] = 0x0100 // G = -256
 	v.regs[vdp2COBB] = 0x0000
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// Green (0,255,0) + offset (0, -256, 0) = (0, clamp(255-256)=0, 0)
+	// Green (0,248,0) + offset (0, -256, 0) = (0, clamp(248-256)=0, 0)
 	if fb[1] != 0 {
 		t.Errorf("offset B G=%d, want 0 (clamped)", fb[1])
 	}
@@ -2517,6 +2610,7 @@ func TestColorOffsetB(t *testing.T) {
 
 func TestColorOffsetDisabled(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2BGON] = 0x0001
 	v.regs[vdp2CHCTLA] = 0x0010
@@ -2539,12 +2633,12 @@ func TestColorOffsetDisabled(t *testing.T) {
 	v.regs[vdp2CLOFEN] = 0x0000
 	v.regs[vdp2COAR] = 200
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// No offset applied: should be pure green
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("offset disabled pixel = (%d,%d,%d), want (0,255,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("offset disabled pixel = (%d,%d,%d), want (0,248,0)", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -2600,23 +2694,23 @@ func TestLineScrollX(t *testing.T) {
 	v.vram[0x20006] = 0x00
 	v.vram[0x20007] = 0x00
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	width := 320
 
 	// Line 0, pixel (0,0): scroll X=0, column 0, dot=10 -> red
 	px00 := buf[0]
-	r00 := uint8(px00 >> 16)
-	if r00 != 255 {
-		t.Errorf("line 0 pixel R=%d, want 255 (red)", r00)
+	r00 := uint8(screen.ColorR(px00))
+	if r00 != 248 {
+		t.Errorf("line 0 pixel R=%d, want 248 (red)", r00)
 	}
 
 	// Line 1, pixel (0,1): scroll X=1, column 1, dot=11 -> green
 	px01 := buf[width]
-	g01 := uint8(px01 >> 8)
-	if g01 != 255 {
-		t.Errorf("line 1 pixel G=%d, want 255 (green)", g01)
+	g01 := uint8(screen.ColorG(px01))
+	if g01 != 248 {
+		t.Errorf("line 1 pixel G=%d, want 248 (green)", g01)
 	}
 }
 
@@ -2661,23 +2755,23 @@ func TestLineScrollInterval(t *testing.T) {
 	v.vram[0x20006] = 0x00
 	v.vram[0x20007] = 0x00
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	width := 320
 
 	// Lines 0 and 1 should both use entry 0 (scroll X=0 -> red)
-	r0 := uint8(buf[0] >> 16)
-	r1 := uint8(buf[width] >> 16)
-	if r0 != 255 || r1 != 255 {
-		t.Errorf("interval: line 0 R=%d, line 1 R=%d, want 255,255", r0, r1)
+	r0 := uint8(screen.ColorR(buf[0]))
+	r1 := uint8(screen.ColorR(buf[width]))
+	if r0 != 248 || r1 != 248 {
+		t.Errorf("interval: line 0 R=%d, line 1 R=%d, want 248,248", r0, r1)
 	}
 
 	// Lines 2 and 3 should use entry 1 (scroll X=1 -> green)
-	g2 := uint8(buf[2*width] >> 8)
-	g3 := uint8(buf[3*width] >> 8)
-	if g2 != 255 || g3 != 255 {
-		t.Errorf("interval: line 2 G=%d, line 3 G=%d, want 255,255", g2, g3)
+	g2 := uint8(screen.ColorG(buf[2*width]))
+	g3 := uint8(screen.ColorG(buf[3*width]))
+	if g2 != 248 || g3 != 248 {
+		t.Errorf("interval: line 2 G=%d, line 3 G=%d, want 248,248", g2, g3)
 	}
 }
 
@@ -2736,21 +2830,21 @@ func TestVerticalCellScroll(t *testing.T) {
 	v.vram[0x30006] = 0x00
 	v.vram[0x30007] = 0x00
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 
 	// Pixel (0,0): column 0, VCSC Y offset=0. Source row 0 = dot 10 = red
 	px00 := buf[0]
-	r00 := uint8(px00 >> 16)
-	if r00 != 255 {
-		t.Errorf("VCSC col 0 pixel R=%d, want 255 (red, row 0)", r00)
+	r00 := uint8(screen.ColorR(px00))
+	if r00 != 248 {
+		t.Errorf("VCSC col 0 pixel R=%d, want 248 (red, row 0)", r00)
 	}
 
 	// Pixel (8,0): column 1, VCSC Y offset=1. Source row 1 = dot 11 = green
 	px80 := buf[8]
-	g80 := uint8(px80 >> 8)
-	if g80 != 255 {
-		t.Errorf("VCSC col 1 pixel G=%d, want 255 (green, row 1)", g80)
+	g80 := uint8(screen.ColorG(px80))
+	if g80 != 248 {
+		t.Errorf("VCSC col 1 pixel G=%d, want 248 (green, row 1)", g80)
 	}
 }
 
@@ -2821,6 +2915,7 @@ func setupNBG0Green(t *testing.T) *VDP2 {
 
 func TestWindowW0Inside(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// W0 rectangle: (2,2)-(5,5), inside mode for NBG0.
 	// W0A=0 "Activates Inside" makes the transparent process run inside the
@@ -2834,8 +2929,8 @@ func TestWindowW0Inside(t *testing.T) {
 	// WCTLA: NBG0 W0 enable=1 (bit 1), W0 area=0 (bit 0, inside mode)
 	v.regs[vdp2WCTLA] = 0x0002
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,3) inside window -> transparency active -> back screen (black)
@@ -2846,13 +2941,14 @@ func TestWindowW0Inside(t *testing.T) {
 	}
 
 	// Pixel (0,0) outside window -> not active -> layer drawn (green)
-	if fb[1] != 255 {
-		t.Errorf("outside window px(0,0) G=%d, want 255 (visible)", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("outside window px(0,0) G=%d, want 248 (visible)", fb[1])
 	}
 }
 
 func TestWindowW0Outside(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// W0: (2,2)-(5,5), outside mode.
 	// W0A=1 "Activates Outside" makes the transparent process run outside
@@ -2866,24 +2962,25 @@ func TestWindowW0Outside(t *testing.T) {
 	// WCTLA: NBG0 W0 enable=1, W0 area=1 (outside mode)
 	v.regs[vdp2WCTLA] = 0x0003
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,3) inside rectangle -> not active -> layer drawn (green)
 	off := (3*width + 3) * 4
-	if fb[off+1] != 255 {
-		t.Errorf("outside mode: px(3,3) G=%d, want 255 (visible)", fb[off+1])
+	if fb[off+1] != 248 {
+		t.Errorf("outside mode: px(3,3) G=%d, want 248 (visible)", fb[off+1])
 	}
 
 	// Pixel (0,0) outside rectangle -> transparency active -> masked
-	if fb[1] == 255 {
+	if fb[1] == 248 {
 		t.Errorf("outside mode: px(0,0) should be masked, got green")
 	}
 }
 
 func TestWindowBothAND(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// W0: (0,0)-(5,7), W1: (3,0)-(7,7)
 	// AND intersection: (3,0)-(5,7) within the 8x8 tile
@@ -2904,31 +3001,32 @@ func TestWindowBothAND(t *testing.T) {
 	// (the layer is hidden in that intersection and visible elsewhere).
 	v.regs[vdp2WCTLA] = 0x008A // N0LOG bit 7 (AND), W1en bit 3, W0en bit 1
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (4,3): inside both W0(0-5) and W1(3-7) -> AND active -> masked
 	off := (3*width + 4) * 4
-	if fb[off+1] == 255 {
+	if fb[off+1] == 248 {
 		t.Errorf("AND intersection px(4,3) should be masked, got green")
 	}
 
 	// Pixel (1,3): inside W0 only -> not both active -> visible
 	off2 := (3*width + 1) * 4
-	if fb[off2+1] != 255 {
-		t.Errorf("AND W0-only px(1,3) G=%d, want 255 (visible)", fb[off2+1])
+	if fb[off2+1] != 248 {
+		t.Errorf("AND W0-only px(1,3) G=%d, want 248 (visible)", fb[off2+1])
 	}
 
 	// Pixel (6,3): inside W1 only -> not both active -> visible
 	off3 := (3*width + 6) * 4
-	if fb[off3+1] != 255 {
-		t.Errorf("AND W1-only px(6,3) G=%d, want 255 (visible)", fb[off3+1])
+	if fb[off3+1] != 248 {
+		t.Errorf("AND W1-only px(6,3) G=%d, want 248 (visible)", fb[off3+1])
 	}
 }
 
 func TestLineWindowW0(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// Line window table at VRAM 0x40000; W0LWE=1 (bit 15).
 	// LWTA0U = 0x8002, LWTA0L = 0x0000 -> addr = ((2<<16)|0)*2 = 0x40000
@@ -2971,58 +3069,59 @@ func TestLineWindowW0(t *testing.T) {
 	// per-line range, so the layer is hidden inside and visible outside.
 	v.regs[vdp2WCTLA] = 0x0002
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Line 0, pixel (3,0): inside window (2-5) -> masked
 	off := (0*width + 3) * 4
-	if fb[off+1] == 255 {
+	if fb[off+1] == 248 {
 		t.Errorf("line window L0 px(3,0) should be masked (inside)")
 	}
 
 	// Line 0, pixel (0,0): outside window (2-5) -> visible
-	if fb[1] != 255 {
-		t.Errorf("line window L0 px(0,0) G=%d, want 255 (outside)", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("line window L0 px(0,0) G=%d, want 248 (outside)", fb[1])
 	}
 
 	// Line 1, pixel (2,1): inside window (0-3) -> masked
 	off2 := (1*width + 2) * 4
-	if fb[off2+1] == 255 {
+	if fb[off2+1] == 248 {
 		t.Errorf("line window L1 px(2,1) should be masked (inside)")
 	}
 
 	// Line 1, pixel (5,1): outside window (0-3) -> visible
 	off3 := (1*width + 5) * 4
-	if fb[off3+1] != 255 {
-		t.Errorf("line window L1 px(5,1) G=%d, want 255 (outside)", fb[off3+1])
+	if fb[off3+1] != 248 {
+		t.Errorf("line window L1 px(5,1) G=%d, want 248 (outside)", fb[off3+1])
 	}
 
 	// Line 2, pixels (0,2) and (7,2): the negative start covers the
 	// whole line -> masked. Masking the start word to 10 bits would
 	// read 511 and wrongly leave the line unmasked.
 	off5 := (2*width + 0) * 4
-	if fb[off5+1] == 255 {
+	if fb[off5+1] == 248 {
 		t.Errorf("line window L2 px(0,2) should be masked (negative start covers line)")
 	}
 	off6 := (2*width + 7) * 4
-	if fb[off6+1] == 255 {
+	if fb[off6+1] == 248 {
 		t.Errorf("line window L2 px(7,2) should be masked (negative start covers line)")
 	}
 
 	// Line 3, pixel (2,3): horizontally inside the table range (0-8) but
 	// outside the vertical window (WPEY0=2) -> not masked, visible.
 	off4 := (3*width + 2) * 4
-	if fb[off4+1] != 255 {
-		t.Errorf("line window L3 px(2,3) G=%d, want 255 (outside vertical bound)", fb[off4+1])
+	if fb[off4+1] != 248 {
+		t.Errorf("line window L3 px(2,3) G=%d, want 248 (outside vertical bound)", fb[off4+1])
 	}
 }
 
 func TestSpriteWindow(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
-	// Sprite type 2 (SD at bit 15)
-	v.regs[vdp2SPCTL] = 0x0002
+	// Sprite type 2 (SD at bit 15), sprite window enabled (SPWINEN)
+	v.regs[vdp2SPCTL] = 0x0012
 
 	// VDP1 framebuffer: set SD=1 (bit 15) at pixels (2,0) and (3,0)
 	spFB := make([]byte, 512*256*2)
@@ -3040,30 +3139,31 @@ func TestSpriteWindow(t *testing.T) {
 	// layer is hidden there and visible where SD is clear.
 	v.regs[vdp2WCTLA] = 0x0020
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (2,0): SD=1, inside sprite window -> masked
 	off := (0*width + 2) * 4
-	if fb[off+1] == 255 {
+	if fb[off+1] == 248 {
 		t.Errorf("sprite window px(2,0) should be masked (inside SW)")
 	}
 
 	// Pixel (0,0): SD=0, outside sprite window -> visible (green)
-	if fb[1] != 255 {
-		t.Errorf("sprite window px(0,0) G=%d, want 255 (outside SW)", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("sprite window px(0,0) G=%d, want 248 (outside SW)", fb[1])
 	}
 
 	// Pixel (3,0): SD=1, inside -> masked
 	off3 := (0*width + 3) * 4
-	if fb[off3+1] == 255 {
+	if fb[off3+1] == 248 {
 		t.Errorf("sprite window px(3,0) should be masked (inside SW)")
 	}
 }
 
 func TestWindowW0HiRes(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 	// Switch to 640 mode: DISP=1, HRESO=010
 	v.regs[vdp2TVMD] = 0x8002
 	v.recalcTiming()
@@ -3075,8 +3175,8 @@ func TestWindowW0HiRes(t *testing.T) {
 	v.regs[vdp2WPEY0] = 5
 	v.regs[vdp2WCTLA] = 0x0002
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth) // 640
 
 	// Pixel (3,3) inside window -> transparency active -> masked
@@ -3087,8 +3187,8 @@ func TestWindowW0HiRes(t *testing.T) {
 	}
 
 	// Pixel (0,0) outside window -> not active -> visible (green)
-	if fb[1] != 255 {
-		t.Errorf("hi-res outside window px(0,0) G=%d, want 255 (visible)", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("hi-res outside window px(0,0) G=%d, want 248 (visible)", fb[1])
 	}
 }
 
@@ -3096,6 +3196,7 @@ func TestWindowW0HiRes(t *testing.T) {
 
 func TestCCWindowW0Inside(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16 (50%)
 
@@ -3107,27 +3208,28 @@ func TestCCWindowW0Inside(t *testing.T) {
 	v.regs[vdp2WPEX0] = 10
 	v.regs[vdp2WPEY0] = 5
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,3): inside W0 active area -> CC suppressed -> pure green
 	off := (3*width + 3) * 4
-	if fb[off] != 0 || fb[off+1] != 255 || fb[off+2] != 0 {
-		t.Errorf("CC window inside px(3,3) = (%d,%d,%d), want (0,255,0)",
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
+		t.Errorf("CC window inside px(3,3) = (%d,%d,%d), want (0,248,0)",
 			fb[off], fb[off+1], fb[off+2])
 	}
 
-	// Pixel (0,0): outside W0 active area -> CC applies. PDF ratio 16 = (135,119).
+	// Pixel (0,0): outside W0 active area -> CC applies. PDF ratio 16 = (131,116).
 	r, g := fb[0], fb[1]
-	if r < 134 || r > 136 || g < 118 || g > 120 {
-		t.Errorf("CC window outside px(0,0) = (%d,%d,%d), want ~(135,119,0)",
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("CC window outside px(0,0) = (%d,%d,%d), want ~(131,116,0)",
 			fb[0], fb[1], fb[2])
 	}
 }
 
 func TestCCWindowW0Outside(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 
@@ -3139,28 +3241,29 @@ func TestCCWindowW0Outside(t *testing.T) {
 	v.regs[vdp2WPEX0] = 10
 	v.regs[vdp2WPEY0] = 5
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,3): inside W0 rect, but area=outside so active area is outside
-	// -> NOT in active area -> CC applies. PDF ratio 16 = (135,119).
+	// -> NOT in active area -> CC applies. PDF ratio 16 = (131,116).
 	off := (3*width + 3) * 4
 	r, g := fb[off], fb[off+1]
-	if r < 134 || r > 136 || g < 118 || g > 120 {
-		t.Errorf("CC window outside-mode px(3,3) = (%d,%d,%d), want ~(135,119,0)",
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("CC window outside-mode px(3,3) = (%d,%d,%d), want ~(131,116,0)",
 			fb[off], fb[off+1], fb[off+2])
 	}
 
 	// Pixel (0,0): outside W0 rect, active area IS outside -> CC suppressed
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("CC window outside-mode px(0,0) = (%d,%d,%d), want (0,255,0)",
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("CC window outside-mode px(0,0) = (%d,%d,%d), want (0,248,0)",
 			fb[0], fb[1], fb[2])
 	}
 }
 
 func TestCCWindowBothAND(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 
@@ -3179,36 +3282,37 @@ func TestCCWindowBothAND(t *testing.T) {
 	v.regs[vdp2WPEX1] = 14
 	v.regs[vdp2WPEY1] = 7
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (4,3): inside both -> AND active -> CC suppressed -> pure green
 	off := (3*width + 4) * 4
-	if fb[off] != 0 || fb[off+1] != 255 || fb[off+2] != 0 {
-		t.Errorf("AND intersection px(4,3) = (%d,%d,%d), want (0,255,0)",
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
+		t.Errorf("AND intersection px(4,3) = (%d,%d,%d), want (0,248,0)",
 			fb[off], fb[off+1], fb[off+2])
 	}
 
-	// Pixel (1,3): inside W0 only -> AND fails -> CC applies. PDF ratio 16 = (135,119).
+	// Pixel (1,3): inside W0 only -> AND fails -> CC applies. PDF ratio 16 = (131,116).
 	off2 := (3*width + 1) * 4
 	r, g := fb[off2], fb[off2+1]
-	if r < 134 || r > 136 || g < 118 || g > 120 {
-		t.Errorf("AND W0-only px(1,3) = (%d,%d,%d), want ~(135,119,0)",
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("AND W0-only px(1,3) = (%d,%d,%d), want ~(131,116,0)",
 			fb[off2], fb[off2+1], fb[off2+2])
 	}
 
-	// Pixel (6,3): inside W1 only -> AND fails -> CC applies. PDF ratio 16 = (135,119).
+	// Pixel (6,3): inside W1 only -> AND fails -> CC applies. PDF ratio 16 = (131,116).
 	off3 := (3*width + 6) * 4
 	r2, g2 := fb[off3], fb[off3+1]
-	if r2 < 134 || r2 > 136 || g2 < 118 || g2 > 120 {
-		t.Errorf("AND W1-only px(6,3) = (%d,%d,%d), want ~(135,119,0)",
+	if r2 < 130 || r2 > 132 || g2 < 115 || g2 > 117 {
+		t.Errorf("AND W1-only px(6,3) = (%d,%d,%d), want ~(131,116,0)",
 			fb[off3], fb[off3+1], fb[off3+2])
 	}
 }
 
 func TestCCWindowSpriteWindow(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 
@@ -3226,28 +3330,92 @@ func TestCCWindowSpriteWindow(t *testing.T) {
 	// CC window: SW enable, inside mode
 	v.regs[vdp2WCTLD] = 0x2000
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (2,0): SD=1, inside sprite window -> CC suppressed -> pure green
 	off := (0*width + 2) * 4
-	if fb[off] != 0 || fb[off+1] != 255 || fb[off+2] != 0 {
-		t.Errorf("SW inside px(2,0) = (%d,%d,%d), want (0,255,0)",
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
+		t.Errorf("SW inside px(2,0) = (%d,%d,%d), want (0,248,0)",
 			fb[off], fb[off+1], fb[off+2])
 	}
 
 	// Pixel (0,0): SD=0, outside sprite window -> CC applies -> blended
-	// Ratio 16 -> top:sec = 15:17 per PDF, so values shift +/-8 from 127.
+	// Ratio 16 -> top:sec = 15:17 per PDF: R = 248*17/32 = 131, G = 248*15/32 = 116.
 	r, g := fb[0], fb[1]
-	if r < 134 || r > 136 || g < 118 || g > 120 {
-		t.Errorf("SW outside px(0,0) = (%d,%d,%d), want ~(135,119,0)",
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("SW outside px(0,0) = (%d,%d,%d), want ~(131,116,0)",
 			fb[0], fb[1], fb[2])
+	}
+}
+
+// TestCCWindowSpriteWindowRequiresSPWINEN holds the sprite window
+// off while SPWINEN is clear: a layer's SW control bits then read
+// nothing from the frame buffer MSB, so a pixel whose MSB is set is
+// outside the window and color calculation still applies to it.
+func TestCCWindowSpriteWindowRequiresSPWINEN(t *testing.T) {
+	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
+	v.regs[vdp2CCCTL] = 0x0001
+	v.regs[vdp2CCRNA] = 16
+	v.regs[vdp2SPCTL] = 0x0002 // SPWINEN=0, SPTYPE=2
+	spFB := make([]byte, 512*256*2)
+	spFB[(0*512+2)*2] = 0x80
+	fbView := vdp1FBView{data: spFB, is8bpp: false, width: 512, height: 256}
+	v.regs[vdp2WCTLD] = 0x2000 // CC window: SW enable, inside mode
+
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
+	width := int(v.activeWidth)
+
+	off := (0*width + 2) * 4
+	r, g := fb[off], fb[off+1]
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("MSB-set px(2,0) with SPWINEN clear = (%d,%d,%d), want blended ~(131,116,0)",
+			fb[off], fb[off+1], fb[off+2])
+	}
+}
+
+// TestSpriteWindowDisablesMSBShadow holds MSB shadow off while the
+// sprite window is enabled: the frame buffer MSB is the window bit
+// then (SPCTL SPWINEN description, Sec 14.1 MSB Shadow). A window-marked
+// sprite pixel with a nonzero color draws at full brightness, and a
+// window-marked pixel with a zero color is transparent and casts no
+// shadow on the scroll screen below even with TPSDSL set.
+func TestSpriteWindowDisablesMSBShadow(t *testing.T) {
+	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
+	v.regs[vdp2SPCTL] = 0x0012 // SPWINEN=1, SPTYPE=2
+	v.regs[vdp2SDCTL] = 0x0101 // TPSDSL=1, N0SDEN=1
+	v.regs[vdp2PRISA] = 0x0007
+	v.cram[1*2] = 0x7F
+	v.cram[1*2+1] = 0xFF // sprite dot color 1 = white (248,248,248)
+	spFB := make([]byte, 512*256*2)
+	spFB[(0*512+2)*2] = 0x80
+	spFB[(0*512+2)*2+1] = 0x01 // MSB set, dot color 1
+	spFB[(0*512+3)*2] = 0x80   // MSB set, dot color 0
+	fbView := vdp1FBView{data: spFB, is8bpp: false, width: 512, height: 256}
+
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
+	width := int(v.activeWidth)
+
+	off := (0*width + 2) * 4
+	if fb[off] != 248 || fb[off+1] != 248 || fb[off+2] != 248 {
+		t.Errorf("window-marked sprite px(2,0) = (%d,%d,%d), want (248,248,248)",
+			fb[off], fb[off+1], fb[off+2])
+	}
+	off = (0*width + 3) * 4
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
+		t.Errorf("window-marked transparent px(3,0) = (%d,%d,%d), want NBG0 (0,248,0)",
+			fb[off], fb[off+1], fb[off+2])
 	}
 }
 
 func TestCCWindowLineWindow(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 
@@ -3265,22 +3433,22 @@ func TestCCWindowLineWindow(t *testing.T) {
 	// CC window: W0 enable, inside mode
 	v.regs[vdp2WCTLD] = 0x0200
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,0): inside line window -> CC suppressed -> pure green
 	off := (0*width + 3) * 4
-	if fb[off] != 0 || fb[off+1] != 255 || fb[off+2] != 0 {
-		t.Errorf("line window inside px(3,0) = (%d,%d,%d), want (0,255,0)",
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
+		t.Errorf("line window inside px(3,0) = (%d,%d,%d), want (0,248,0)",
 			fb[off], fb[off+1], fb[off+2])
 	}
 
 	// Pixel (0,0): outside line window -> CC applies -> blended
-	// Ratio 16 -> top:sec = 15:17 per PDF, so values shift +/-8 from 127.
+	// Ratio 16 -> top:sec = 15:17 per PDF: R = 248*17/32 = 131, G = 248*15/32 = 116.
 	r, g := fb[0], fb[1]
-	if r < 134 || r > 136 || g < 118 || g > 120 {
-		t.Errorf("line window outside px(0,0) = (%d,%d,%d), want ~(135,119,0)",
+	if r < 130 || r > 132 || g < 115 || g > 117 {
+		t.Errorf("line window outside px(0,0) = (%d,%d,%d), want ~(131,116,0)",
 			fb[0], fb[1], fb[2])
 	}
 }
@@ -3288,7 +3456,8 @@ func TestCCWindowLineWindow(t *testing.T) {
 // --- Shadow function tests ---
 
 func TestNormalShadow(t *testing.T) {
-	v := setupNBG0Green(t) // green = (0, 255, 0)
+	v := setupNBG0Green(t) // green = (0, 248, 0)
+	swr := newSoftwareRenderer(v)
 
 	// Sprite type 2 (SD at bit 15)
 	v.regs[vdp2SPCTL] = 0x0002
@@ -3310,26 +3479,27 @@ func TestNormalShadow(t *testing.T) {
 	// Sprite priority register 0 = 5 (higher than NBG0)
 	v.regs[vdp2PRISA] = 0x0005
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,0): shadow sprite -> NBG0 green should be darkened
-	// Green (0, 255, 0) -> halved -> (0, 127, 0)
+	// Green (0, 248, 0) -> halved -> (0, 124, 0)
 	off := (0*width + 3) * 4
 	g := fb[off+1]
-	if g != 127 {
-		t.Errorf("shadow px(3,0) G=%d, want 127 (halved green)", g)
+	if g != 124 {
+		t.Errorf("shadow px(3,0) G=%d, want 124 (halved green)", g)
 	}
 
 	// Pixel (0,0): no shadow sprite -> full green
-	if fb[1] != 255 {
-		t.Errorf("no shadow px(0,0) G=%d, want 255 (full green)", fb[1])
+	if fb[1] != 248 {
+		t.Errorf("no shadow px(0,0) G=%d, want 248 (full green)", fb[1])
 	}
 }
 
 func TestShadowDisabled(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2SPCTL] = 0x0002
 
@@ -3343,21 +3513,22 @@ func TestShadowDisabled(t *testing.T) {
 	v.regs[vdp2PRINA] = 0x0003
 	v.regs[vdp2PRISA] = 0x0005
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,0): shadow sprite present but SDCTL disabled -> no darkening
 	// NBG0 should show full green
 	off := (0*width + 3) * 4
 	g := fb[off+1]
-	if g != 255 {
-		t.Errorf("shadow disabled px(3,0) G=%d, want 255 (no darkening)", g)
+	if g != 248 {
+		t.Errorf("shadow disabled px(3,0) G=%d, want 248 (no darkening)", g)
 	}
 }
 
 func TestMSBTranspShadowOnNBG(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// Sprite type 6, MSB transparent shadow pixel at (3,0)
 	v.regs[vdp2SPCTL] = 0x0006
@@ -3370,19 +3541,20 @@ func TestMSBTranspShadowOnNBG(t *testing.T) {
 	v.regs[vdp2PRINA] = 0x0003
 	v.regs[vdp2PRISA] = 0x0005
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,0): transparent shadow projects onto NBG0 -> halved green
 	off := (0*width + 3) * 4
-	if g := fb[off+1]; g != 127 {
-		t.Errorf("transp shadow px(3,0) G=%d, want 127 (halved green)", g)
+	if g := fb[off+1]; g != 124 {
+		t.Errorf("transp shadow px(3,0) G=%d, want 124 (halved green)", g)
 	}
 }
 
 func TestMSBTranspShadowDisabledDotTransparent(t *testing.T) {
 	v := setupNBG0Green(t)
+	swr := newSoftwareRenderer(v)
 
 	// Sprite type 6 with palette color mode, as used by the erase color
 	// 0x8000: SD=1, PR/CC/DC all zero. With TPSDSL=0 the dot must be fully
@@ -3397,14 +3569,14 @@ func TestMSBTranspShadowDisabledDotTransparent(t *testing.T) {
 	v.regs[vdp2PRINA] = 0x0003
 	v.regs[vdp2PRISA] = 0x0005
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Pixel (3,0): NBG0 shows through at full green
 	off := (0*width + 3) * 4
-	if g := fb[off+1]; g != 255 {
-		t.Errorf("nullified transp shadow px(3,0) G=%d, want 255 (NBG0 visible)", g)
+	if g := fb[off+1]; g != 248 {
+		t.Errorf("nullified transp shadow px(3,0) G=%d, want 248 (NBG0 visible)", g)
 	}
 }
 
@@ -3415,6 +3587,7 @@ func TestLineColorScreen(t *testing.T) {
 	// With line color enabled for NBG0, CC blends NBG0 with line color
 	// instead of NBG1.
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	// Enable CC for NBG0, ratio=16 (50%)
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1
@@ -3434,14 +3607,14 @@ func TestLineColorScreen(t *testing.T) {
 	v.vram[0x50000] = 0x00
 	v.vram[0x50001] = 30
 	v.cram[30*2] = 0x7C
-	v.cram[30*2+1] = 0x00 // blue = (0, 0, 255)
+	v.cram[30*2+1] = 0x00 // blue = (0, 0, 248)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// Expected per PDF ratio 16: top:sec = 15:17 / 32.
-	// Top = green (0,255,0), second = blue line color (0,0,255).
-	// G = 255*15/32 ~= 119, B = 255*17/32 ~= 135.
+	// Top = green (0,248,0), second = blue line color (0,0,248).
+	// G = 248*15/32 ~= 116, B = 248*17/32 ~= 131.
 	r := fb[0]
 	g2 := fb[1]
 	b := fb[2]
@@ -3449,11 +3622,11 @@ func TestLineColorScreen(t *testing.T) {
 	if r != 0 {
 		t.Errorf("line color R=%d, want 0", r)
 	}
-	if g2 < 118 || g2 > 120 {
-		t.Errorf("line color G=%d, want ~119", g2)
+	if g2 < 115 || g2 > 117 {
+		t.Errorf("line color G=%d, want ~116", g2)
 	}
-	if b < 134 || b > 136 {
-		t.Errorf("line color B=%d, want ~135 (from line color blue)", b)
+	if b < 130 || b > 132 {
+		t.Errorf("line color B=%d, want ~131 (from line color blue)", b)
 	}
 }
 
@@ -3461,6 +3634,7 @@ func TestLineColorScreen(t *testing.T) {
 // for every scanline regardless of which line is being rendered.
 func TestLineColorScreen_SingleColorMode(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 	v.regs[vdp2LNCLEN] = 0x0001
@@ -3482,8 +3656,8 @@ func TestLineColorScreen_SingleColorMode(t *testing.T) {
 	v.cram[31*2] = 0x00
 	v.cram[31*2+1] = 0x1F // red
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth) * 4
 
 	// Line 0: must blend with blue (offset 0). B should be high.
@@ -3502,6 +3676,7 @@ func TestLineColorScreen_SingleColorMode(t *testing.T) {
 // TestLineColorScreen_PerLineMode verifies LCCLMD=1 indexes per scanline.
 func TestLineColorScreen_PerLineMode(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 	v.regs[vdp2LNCLEN] = 0x0001
@@ -3522,8 +3697,8 @@ func TestLineColorScreen_PerLineMode(t *testing.T) {
 	v.cram[31*2] = 0x00
 	v.cram[31*2+1] = 0x1F // red
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth) * 4
 
 	// Line 0: blue
@@ -3541,6 +3716,7 @@ func TestLineColorScreen_PerLineMode(t *testing.T) {
 // and the table read 2 bytes lower than intended.
 func TestLineColorScreen_LCTA0Bit(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 	v.regs[vdp2LNCLEN] = 0x0001
@@ -3562,8 +3738,8 @@ func TestLineColorScreen_LCTA0Bit(t *testing.T) {
 	v.cram[31*2] = 0x00
 	v.cram[31*2+1] = 0x1F // red
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// Pixel (0,0) should blend with blue (correct LCTA0=1 address).
 	if r := fb[0]; r > 5 {
@@ -3829,7 +4005,7 @@ func TestIsRPWindowB_LogicBit(t *testing.T) {
 		wantUseB bool
 	}{
 		// Manual Sec 6 (p.190): Param B is shown in the active area,
-		// Param A outside it. isRPWindowB returns true for Param B.
+		// Param A outside it. The window selects Param B when true.
 		{"OR + inside W0 only -> active -> param B", 0x000A, 3, 3, true},
 		{"OR + inside both -> active -> param B", 0x000A, 7, 3, true},
 		{"OR + outside both -> not active -> param A", 0x000A, 20, 3, false},
@@ -3856,8 +4032,8 @@ func TestIsRPWindowB_LogicBit(t *testing.T) {
 			v.regs[vdp2WPEY1] = 7
 
 			v.BeginFrame()
-			if got := v.isRPWindowB(tc.x, tc.y); got != tc.wantUseB {
-				t.Errorf("isRPWindowB(%d,%d) = %v, want %v", tc.x, tc.y, got, tc.wantUseB)
+			if got := rpWindowBTest(v, tc.x, tc.y); got != tc.wantUseB {
+				t.Errorf("RP window B at (%d,%d) = %v, want %v", tc.x, tc.y, got, tc.wantUseB)
 			}
 		})
 	}
@@ -3873,7 +4049,7 @@ func TestIsRPWindowB_LogicBit(t *testing.T) {
 // the full window) and a negative start covers the line from its left
 // edge (the Panzer Dragoon Zwei ep3 ground pattern: start 0xFFFE /
 // end 0x02C0 - masking the start to 10 bits wrongly empties the
-// window). Param B is shown in the active area (p.190); isRPWindowB
+// window). Param B is shown in the active area (p.190); the RBG span
 // returns true for Param B.
 // TestLineWindowX exercises the signed line-window-table coordinate
 // conversion: the full 16-bit word is signed, and in normal resolution
@@ -3898,8 +4074,8 @@ func TestLineWindowX(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			v := newTestVDP2()
 			v.frame.hiRes = tc.hiRes
-			if got := v.lineWindowX(tc.raw); got != tc.want {
-				t.Errorf("lineWindowX(0x%04X) = %d, want %d", tc.raw, got, tc.want)
+			if got := int(screen.LineWindowX(v.windowParams(), uint32(tc.raw))); got != tc.want {
+				t.Errorf("LineWindowX(0x%04X) = %d, want %d", tc.raw, got, tc.want)
 			}
 		})
 	}
@@ -3960,8 +4136,8 @@ func TestIsRPWindowB_LineWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			v := setup(tc.wctld)
 			v.BeginFrame()
-			if got := v.isRPWindowB(tc.x, tc.y); got != tc.wantUseB {
-				t.Errorf("isRPWindowB(%d,%d) = %v, want %v", tc.x, tc.y, got, tc.wantUseB)
+			if got := rpWindowBTest(v, tc.x, tc.y); got != tc.wantUseB {
+				t.Errorf("RP window B at (%d,%d) = %v, want %v", tc.x, tc.y, got, tc.wantUseB)
 			}
 		})
 	}
@@ -4019,9 +4195,9 @@ func TestRBGCoefAddrFromFP(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rbgCoefAddrFromFP(tc.kastFP, tc.ktaofBits, tc.oneWord)
+			got := screen.CoefAddr(tc.kastFP, tc.ktaofBits, tc.oneWord)
 			if got != tc.want {
-				t.Errorf("rbgCoefAddrFromFP = 0x%X, want 0x%X", got, tc.want)
+				t.Errorf("CoefAddr = 0x%X, want 0x%X", got, tc.want)
 			}
 		})
 	}
@@ -4042,7 +4218,7 @@ func TestRBGCoefAddrPerPixelDKAxFractional(t *testing.T) {
 	// 2-word mode (Bulk Slash uses coefOneWordA=false), KTAOF low byte = 0.
 	const dkax int64 = -1
 	lineKAstFP := rbgLineKAstFP(50250016, 2299, 10, 0)
-	lineAddr := rbgCoefAddrFromFP(lineKAstFP, 0, false)
+	lineAddr := screen.CoefAddr(lineKAstFP, 0, false)
 
 	// Sample across a 320-pixel scanline. The PDF formula keeps the
 	// per-pixel integer part of KAst nearly constant since
@@ -4051,7 +4227,7 @@ func TestRBGCoefAddrPerPixelDKAxFractional(t *testing.T) {
 	// from the line's base address.
 	for _, hcnt := range []int64{0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 319} {
 		pixelFP := lineKAstFP + dkax*hcnt
-		addr := rbgCoefAddrFromFP(pixelFP, 0, false)
+		addr := screen.CoefAddr(pixelFP, 0, false)
 		drift := int64(addr) - int64(lineAddr)
 		if drift < -4 || drift > 0 {
 			t.Errorf("hcnt=%d: addr=0x%X drifted %d bytes from lineAddr=0x%X (expected 0 or -4)",
@@ -4069,7 +4245,7 @@ func TestRBGCoefAddrPerPixelDKAxFractional(t *testing.T) {
 	dkaxInt := dkax >> 10 // = -1, the old buggy pre-shift
 	buggyAddr := lineAddr + uint32(dkaxInt*hcnt)*4
 	pixelFP := lineKAstFP + dkax*hcnt
-	correctAddr := rbgCoefAddrFromFP(pixelFP, 0, false)
+	correctAddr := screen.CoefAddr(pixelFP, 0, false)
 	if buggyAddr == correctAddr {
 		t.Fatalf("test is degenerate: buggy and correct formulas agree at hcnt=%d", hcnt)
 	}
@@ -4092,8 +4268,8 @@ func TestRBGCoefAddrPerPixelDKAxBoundary(t *testing.T) {
 	lineKAstFP := int64(8 << 10) // integer 8, fractional 0
 	const dkax int64 = -1
 
-	addr0 := rbgCoefAddrFromFP(lineKAstFP+dkax*0, 0, false)
-	addr1 := rbgCoefAddrFromFP(lineKAstFP+dkax*1, 0, false)
+	addr0 := screen.CoefAddr(lineKAstFP+dkax*0, 0, false)
+	addr1 := screen.CoefAddr(lineKAstFP+dkax*1, 0, false)
 
 	if addr0 != 8*4 {
 		t.Errorf("hcnt=0: addr=0x%X, want 0x%X", addr0, uint32(8*4))
@@ -4177,7 +4353,7 @@ func TestRBG0CoefPerDotBankGating(t *testing.T) {
 	// Bank A0 designated as coefficient table RAM: dot 1 reads its own
 	// entry and that entry's MSB makes it transparent.
 	v := setup(0x0001)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 	if buf[0] == 0 {
 		t.Fatal("designated bank: dot(0,0) should render")
@@ -4219,7 +4395,7 @@ func TestRBG0Identity(t *testing.T) {
 	v.cram[38] = 0x00
 	v.cram[39] = 0x1F
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// Pixel (0,0) should be priority=1, red
@@ -4228,14 +4404,14 @@ func TestRBG0Identity(t *testing.T) {
 		t.Fatal("pixel (0,0) should not be transparent")
 	}
 	pri := uint8(px >> 24)
-	r := uint8(px >> 16)
-	g := uint8(px >> 8)
-	b := uint8(px)
+	r := uint8(screen.ColorR(px))
+	g := uint8(screen.ColorG(px))
+	b := uint8(screen.ColorB(px))
 	if pri != 1 {
 		t.Errorf("priority = %d, want 1", pri)
 	}
-	if r != 255 || g != 0 || b != 0 {
-		t.Errorf("color = (%d,%d,%d), want (255,0,0)", r, g, b)
+	if r != 248 || g != 0 || b != 0 {
+		t.Errorf("color = (%d,%d,%d), want (248,0,0)", r, g, b)
 	}
 
 	// Pixel (0,1) in second row (y=1) -> cell row 1, which is all 0 -> transparent
@@ -4268,14 +4444,14 @@ func TestRBG0HiResHcntDotPairs(t *testing.T) {
 
 	v.hiRes = true
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// With identity rotation mapX equals hcnt, so pixel x samples cell
 	// dot x>>1: pairs repeat and advance one map dot per pair.
 	for x := 0; x < 8; x++ {
-		wantR, _, _ := rgb555ToRGB(uint16(x>>1 + 1))
-		if r := uint8(buf[x] >> 16); r != wantR {
+		wantR := uint8(screen.ColorR(screen.RGB555To888(uint32(x>>1 + 1))))
+		if r := uint8(screen.ColorR(buf[x])); r != wantR {
 			t.Errorf("pixel (%d,0) red = %d, want %d (map dot %d)", x, r, wantR, x>>1)
 		}
 	}
@@ -4308,13 +4484,13 @@ func TestRBG0DoubleDensityVcntFieldLine(t *testing.T) {
 	v.interlace = 3
 	v.oddField = true // field bit 1: the doubled model would read row y*2+1
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	w := int(v.activeWidth)
 	for y := 0; y < 4; y++ {
-		wantR, _, _ := rgb555ToRGB(uint16(y + 1))
-		if r := uint8(buf[y*w] >> 16); r != wantR {
+		wantR := uint8(screen.ColorR(screen.RGB555To888(uint32(y + 1))))
+		if r := uint8(screen.ColorR(buf[y*w])); r != wantR {
 			t.Errorf("line %d red = %d, want %d (map row %d)", y, r, wantR, y)
 		}
 	}
@@ -4339,7 +4515,7 @@ func TestRBG0SFCCMDMode1ScreenEnableGate(t *testing.T) {
 	v.regs[vdp2SFCCMD] = 0x0100
 	v.regs[vdp2CCCTL] = 0x0010
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 	if buf[0]&layerCCBit == 0 {
 		t.Error("RBG0 mode 1, special CC bit set + R0CCEN=1: layerCCBit not set")
@@ -4427,7 +4603,7 @@ func TestRBG0Rotation90(t *testing.T) {
 	v.cram[42] = 0x03
 	v.cram[43] = 0xE0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// With 90deg CW rotation and screen-over=wrap:
@@ -4454,9 +4630,9 @@ func TestRBG0Rotation90(t *testing.T) {
 	if px == 0 {
 		t.Fatal("pixel (0,0) should not be transparent")
 	}
-	r := uint8(px >> 16)
-	if r != 255 {
-		t.Errorf("pixel(0,0) R=%d, want 255 (red)", r)
+	r := uint8(screen.ColorR(px))
+	if r != 248 {
+		t.Errorf("pixel(0,0) R=%d, want 248 (red)", r)
 	}
 
 	// pixel(0,1) reads map Y increasing -> cell (0,0) row 1 which is 0 -> transparent
@@ -4479,6 +4655,7 @@ func TestRBG0Rotation90(t *testing.T) {
 
 func TestRBG0Compositing(t *testing.T) {
 	v := setupRBG0Identity(t)
+	swr := newSoftwareRenderer(v)
 
 	// Also enable NBG0 with priority 2
 	v.regs[vdp2BGON] |= 0x0001
@@ -4517,24 +4694,24 @@ func TestRBG0Compositing(t *testing.T) {
 	v.cram[42] = 0x03
 	v.cram[43] = 0xE0
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	// NBG0 has priority 2, RBG0 has priority 1. NBG0 should be on top -> green.
 	r, g, b := fb[0], fb[1], fb[2]
-	if g != 255 || r != 0 {
-		t.Errorf("pixel(0,0) = (%d,%d,%d), want green (0,255,0) - NBG0 priority 2 over RBG0 priority 1", r, g, b)
+	if g != 248 || r != 0 {
+		t.Errorf("pixel(0,0) = (%d,%d,%d), want green (0,248,0) - NBG0 priority 2 over RBG0 priority 1", r, g, b)
 	}
 
 	// Now make RBG0 priority higher
 	v.regs[vdp2PRIR] = 0x0003 // RBG0 priority = 3
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb = v.Framebuffer()
+	fb = swr.framebuffer()
 	r, g, b = fb[0], fb[1], fb[2]
-	if r != 255 || g != 0 {
-		t.Errorf("pixel(0,0) = (%d,%d,%d), want red (255,0,0) - RBG0 priority 3 over NBG0 priority 2", r, g, b)
+	if r != 248 || g != 0 {
+		t.Errorf("pixel(0,0) = (%d,%d,%d), want red (248,0,0) - RBG0 priority 3 over NBG0 priority 2", r, g, b)
 	}
 }
 
@@ -4561,7 +4738,7 @@ func TestRBG0ScreenOverTransparent(t *testing.T) {
 	// This makes Xp = ... + Cx<<10 + Mx = 0 + 3072000 = 3072000. >> 10 = 3000. > 2048. Out of bounds.
 	writeRotParam32(v, paramBase, 0x44, 3000, 0x0000) // Mx = 3000.0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// With screen-over = transparent, out-of-bounds pixels should be transparent
@@ -4588,7 +4765,7 @@ func TestRBG0ScreenOverWrap(t *testing.T) {
 	paramBase := uint32(0x10000)
 	writeRotParam32(v, paramBase, 0x44, 2048, 0x0000) // Mx = 2048.0
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// After wrapping, pixel(0,0) should map to map(2048%2048=0, 0) = cell(0,0) row 0 = red
@@ -4596,9 +4773,9 @@ func TestRBG0ScreenOverWrap(t *testing.T) {
 	if px == 0 {
 		t.Fatal("pixel(0,0) should not be transparent after wrap")
 	}
-	r := uint8(px >> 16)
-	if r != 255 {
-		t.Errorf("pixel(0,0) R=%d, want 255 (red after wrapping)", r)
+	r := uint8(screen.ColorR(px))
+	if r != 248 {
+		t.Errorf("pixel(0,0) R=%d, want 248 (red after wrapping)", r)
 	}
 }
 
@@ -4663,13 +4840,13 @@ func TestRBG0RPMD2ParamBCoefficient(t *testing.T) {
 	v := setup()
 	writeVRAM16(v, 0x18100, 0x0001) // MSB=0, kx = 1.0
 	writeVRAM16(v, 0x18102, 0x0000)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 	if buf[0] == 0 {
 		t.Fatal("RPMD2 switch to B, B coefficient MSB=0: dot(0,0) should render the B image")
 	}
-	if r := uint8(buf[0] >> 16); r != 255 {
-		t.Errorf("RPMD2 switch to B: dot(0,0) R=%d, want 255 (red)", r)
+	if r := uint8(screen.ColorR(buf[0])); r != 248 {
+		t.Errorf("RPMD2 switch to B: dot(0,0) R=%d, want 248 (red)", r)
 	}
 
 	// Parameter B coefficient MSB=1: the switched dot is transparent.
@@ -4741,10 +4918,10 @@ func TestRBG0BitmapCoefficientTransparency(t *testing.T) {
 	v := setup()
 	writeVRAM16(v, 0x18000, 0x0001)
 	writeVRAM16(v, 0x18002, 0x0000)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	if r := uint8(buf[0] >> 16); r != 255 {
-		t.Errorf("bitmap coefficient MSB=0: dot(0,0) R=%d, want 255 (red)", r)
+	if r := uint8(screen.ColorR(buf[0])); r != 248 {
+		t.Errorf("bitmap coefficient MSB=0: dot(0,0) R=%d, want 248 (red)", r)
 	}
 
 	// MSB=1: dot is transparent.
@@ -4796,10 +4973,10 @@ func TestRBG0BitmapRPMD2ParamBCoefficient(t *testing.T) {
 	v := setup()
 	writeVRAM16(v, 0x18100, 0x0001)
 	writeVRAM16(v, 0x18102, 0x0000)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	if r := uint8(buf[0] >> 16); r != 255 {
-		t.Errorf("bitmap RPMD2 switch, B coefficient MSB=0: dot(0,0) R=%d, want 255 (red)", r)
+	if r := uint8(screen.ColorR(buf[0])); r != 248 {
+		t.Errorf("bitmap RPMD2 switch, B coefficient MSB=0: dot(0,0) R=%d, want 248 (red)", r)
 	}
 
 	// Parameter B coefficient MSB=1: switched dot is transparent.
@@ -4850,7 +5027,7 @@ func setupThreeNBGLayers(t *testing.T, priNBG0, priNBG1, priNBG2 uint8) *VDP2 {
 		v.vram[0x20+i] = 10
 	}
 	v.cram[10*2] = 0x03
-	v.cram[10*2+1] = 0xE0 // green = (0, 255, 0)
+	v.cram[10*2+1] = 0xE0 // green = (0, 248, 0)
 
 	// NBG1: PND at page 4 (0x10000), charNum=4 (cell 0x80), dot=20 -> red
 	v.vram[0x10000] = 0x00
@@ -4861,7 +5038,7 @@ func setupThreeNBGLayers(t *testing.T, priNBG0, priNBG1, priNBG2 uint8) *VDP2 {
 		v.vram[0x80+i] = 20
 	}
 	v.cram[20*2] = 0x00
-	v.cram[20*2+1] = 0x1F // red = (255, 0, 0)
+	v.cram[20*2+1] = 0x1F // red = (248, 0, 0)
 
 	// NBG2: PND at page 8 (0x20000), charNum=6 (cell 0xC0), dot=30 -> blue
 	v.vram[0x20000] = 0x00
@@ -4872,7 +5049,7 @@ func setupThreeNBGLayers(t *testing.T, priNBG0, priNBG1, priNBG2 uint8) *VDP2 {
 		v.vram[0xC0+i] = 30
 	}
 	v.cram[30*2] = 0x7C
-	v.cram[30*2+1] = 0x00 // blue = (0, 0, 255)
+	v.cram[30*2+1] = 0x00 // blue = (0, 0, 248)
 
 	return v
 }
@@ -4881,18 +5058,20 @@ func TestExtendedCC_Disabled(t *testing.T) {
 	// EXCCEN=0, normal 2-layer CC. Green on top, red second, blue third.
 	// Only top+second should blend. Third should be ignored.
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1, EXCCEN=0
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16 (50%)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// PDF ratio 16: top:sec = 15:17 / 32.
-	// Green*15/32 + Red*17/32 = (135,119,0). Blue not involved.
+	// Green*15/32 + Red*17/32 = (248*17/32, 248*15/32, 0) = (131,116,0).
+	// Blue not involved.
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 134 || r > 136 || g < 118 || g > 120 || b != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(135,119,0)", r, g, b)
+	if r < 130 || r > 132 || g < 115 || g > 117 || b != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(131,116,0)", r, g, b)
 	}
 }
 
@@ -4900,35 +5079,38 @@ func TestExtendedCC_TwoLayerBlend(t *testing.T) {
 	// EXCCEN=1, N0CCEN=1, N1CCEN=1. Green (pri=5) top, Red (pri=3) second, Blue (pri=1) third.
 	// Extended: secondExt = (Red + Blue) / 2. Then top/secondExt blend at ratio.
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0403 // EXCCEN=1 (bit 10), N0CCEN=1 (bit 0), N1CCEN=1 (bit 1)
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16 (50%)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// secondExt = (Red(255,0,0) + Blue(0,0,255)) / 2 = (127, 0, 127)
-	// PDF ratio 16: Green*15/32 + secondExt*17/32 = (67,119,67).
+	// secondExt = (Red(248,0,0) + Blue(0,0,248)) / 2 = (124, 0, 124)
+	// PDF ratio 16: Green*15/32 + secondExt*17/32
+	//   R = B = 124*17/32 = 65, G = 248*15/32 = 116 -> (65,116,65).
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 66 || r > 69 || g < 118 || g > 120 || b < 66 || b > 69 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(67,119,67)", r, g, b)
+	if r < 64 || r > 67 || g < 115 || g > 117 || b < 64 || b > 67 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(65,116,65)", r, g, b)
 	}
 }
 
 func TestExtendedCC_SecondCCENOff(t *testing.T) {
 	// EXCCEN=1 but second image (NBG1) CCEN=0. Should act like ratio 4:0:0 (no extended blend).
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0401 // EXCCEN=1, N0CCEN=1, N1CCEN=0
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// No extended blend, same as normal: PDF ratio 16 = (135,119,0)
+	// No extended blend, same as normal: PDF ratio 16 = (131,116,0)
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 134 || r > 136 || g < 118 || g > 120 || b != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(135,119,0)", r, g, b)
+	if r < 130 || r > 132 || g < 115 || g > 117 || b != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(131,116,0)", r, g, b)
 	}
 }
 
@@ -4938,6 +5120,7 @@ func TestExtendedCC_Mode0LineColorNoFourthImage(t *testing.T) {
 	// ratio at 2:1:0 - the 4th image (NBG2 blue) is never added. Mode 1/2
 	// would use 2:1:1, but mode 0 must not blend the 4th image.
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	// EXCCEN (bit 10), N0CCEN (bit 0), N1CCEN (bit 1), LCCCEN (bit 5).
 	v.regs[vdp2CCCTL] = 0x0423
@@ -4952,16 +5135,16 @@ func TestExtendedCC_Mode0LineColorNoFourthImage(t *testing.T) {
 	v.cram[40*2] = 0x00
 	v.cram[40*2+1] = 0x00 // black line color
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// 2:1:0 second image = black/2 + red(255,0,0)/4 + 0 = (63,0,0).
-	// Top green (0,255,0) blended at ratio 16 (15:17/32):
-	//   R = 63*17/32 = 33, G = 255*15/32 = 119, B = 0.
+	// 2:1:0 second image = black/2 + red(248,0,0)/4 + 0 = (62,0,0).
+	// Top green (0,248,0) blended at ratio 16 (15:17/32):
+	//   R = 62*17/32 = 32, G = 248*15/32 = 116, B = 0.
 	// The 4th image (NBG2 blue) must NOT leak into B.
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 32 || r > 34 || g < 118 || g > 120 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(33,119,0)", r, g, b)
+	if r < 31 || r > 33 || g < 115 || g > 117 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(32,116,0)", r, g, b)
 	}
 	if b != 0 {
 		t.Errorf("4th image leaked into B: B=%d, want 0 (mode 0 caps at 2:1:0)", b)
@@ -4971,37 +5154,39 @@ func TestExtendedCC_Mode0LineColorNoFourthImage(t *testing.T) {
 func TestCCRTMD_TopMode(t *testing.T) {
 	// CCRTMD=0: use top image (NBG0) ratio register
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1, CCRTMD=0
 	v.regs[vdp2CCRNA] = 8      // NBG0 ratio=8 (25%), NBG1 ratio=0 (bits 12:8)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// PDF ratio 8: top:sec = (31-8):(8+1) = 23:9 / 32.
-	// Green*23/32 + Red*9/32 = (71,183,0)
+	// Green*23/32 + Red*9/32 = (248*9/32, 248*23/32, 0) = (69,178,0)
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 70 || r > 72 || g < 182 || g > 184 || b != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(71,183,0)", r, g, b)
+	if r < 68 || r > 70 || g < 177 || g > 179 || b != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(69,178,0)", r, g, b)
 	}
 }
 
 func TestCCRTMD_SecondMode(t *testing.T) {
 	// CCRTMD=1: use second image (NBG1) ratio register
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2CCCTL] = 0x0201 // N0CCEN=1, CCRTMD=1 (bit 9)
 	// NBG0 ratio=8, NBG1 ratio=24 (bits 12:8 of CCRNA)
 	v.regs[vdp2CCRNA] = 8 | (24 << 8)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// CCRTMD=1, use NBG1 ratio 24. PDF: top:sec = (31-24):(24+1) = 7:25 / 32.
-	// Green*7/32 + Red*25/32 = (199,55,0)
+	// Green*7/32 + Red*25/32 = (248*25/32, 248*7/32, 0) = (193,54,0)
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 198 || r > 200 || g < 54 || g > 56 || b != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(199,55,0)", r, g, b)
+	if r < 192 || r > 194 || g < 53 || g > 55 || b != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(193,54,0)", r, g, b)
 	}
 }
 
@@ -5009,14 +5194,14 @@ func TestCCRTMD_SecondMode(t *testing.T) {
 
 func TestGradation_Disabled(t *testing.T) {
 	// BOKEN=0: no blur. Verify layer buffer is unmodified.
-	buf := make([]uint32, 320)
+	buf := make([]uint32, testFrameDots)
 	// pixel 0: red (pri=1), pixel 1: green (pri=1), pixel 2: blue (pri=1)
-	buf[0] = 0x01FF0000 // R=255
-	buf[1] = 0x0100FF00 // G=255
-	buf[2] = 0x010000FF // B=255
+	buf[0] = 1<<24 | screen.PackColor(255, 0, 0)
+	buf[1] = 1<<24 | screen.PackColor(0, 255, 0)
+	buf[2] = 1<<24 | screen.PackColor(0, 0, 255)
 
 	// Do not apply gradation; verify raw values
-	if buf[2] != 0x010000FF {
+	if buf[2] != 1<<24|screen.PackColor(0, 0, 255) {
 		t.Errorf("pixel 2 should be unmodified blue, got 0x%08X", buf[2])
 	}
 }
@@ -5024,29 +5209,29 @@ func TestGradation_Disabled(t *testing.T) {
 func TestGradation_NBG0(t *testing.T) {
 	// Apply gradation to a buffer with known pixel values.
 	// pixel 0: R=200, pixel 1: R=100, pixel 2: R=40 (all with G=B=0, pri=1)
-	buf := make([]uint32, 320)
-	buf[0] = 0x01C80000 // R=200
-	buf[1] = 0x01640000 // R=100
-	buf[2] = 0x01280000 // R=40
+	buf := make([]uint32, testFrameDots)
+	buf[0] = 1<<24 | screen.PackColor(200, 0, 0)
+	buf[1] = 1<<24 | screen.PackColor(100, 0, 0)
+	buf[2] = 1<<24 | screen.PackColor(40, 0, 0)
 
-	gradationSpanSetup(buf, 320, 0)(0, 320)
+	screen.GradationSpan(compute.Layer(buf), &screen.GradationParams{Width: 320, Step: 1}, &screen.GradationState{}, 0, 320)
 
 	// pixel 2: blurred = (pixel[0]*1 + pixel[1]*1 + pixel[2]*2) / 4
 	//        = (200 + 100 + 40*2) / 4 = (200 + 100 + 80) / 4 = 380/4 = 95
-	r2 := uint8(buf[2] >> 16)
+	r2 := uint8(screen.ColorR(buf[2]))
 	if r2 != 95 {
 		t.Errorf("pixel 2 R=%d, want 95", r2)
 	}
 
 	// pixel 1: blurred = (0 + pixel[0]*1 + pixel[1]*2) / 4
 	//        = (0 + 200 + 100*2) / 4 = 400/4 = 100
-	r1 := uint8(buf[1] >> 16)
+	r1 := uint8(screen.ColorR(buf[1]))
 	if r1 != 100 {
 		t.Errorf("pixel 1 R=%d, want 100", r1)
 	}
 
 	// pixel 0: blurred = (0 + 0 + pixel[0]*2) / 4 = 400/4 = 100
-	r0 := uint8(buf[0] >> 16)
+	r0 := uint8(screen.ColorR(buf[0]))
 	if r0 != 100 {
 		t.Errorf("pixel 0 R=%d, want 100", r0)
 	}
@@ -5054,13 +5239,13 @@ func TestGradation_NBG0(t *testing.T) {
 
 func TestGradation_LeftEdge(t *testing.T) {
 	// x=0 has no left neighbors -> result = current * 2/4 = current/2
-	buf := make([]uint32, 320)
-	buf[0] = 0x01800000 // R=128, G=0, B=0
+	buf := make([]uint32, testFrameDots)
+	buf[0] = 1<<24 | screen.PackColor(128, 0, 0)
 
-	gradationSpanSetup(buf, 320, 0)(0, 320)
+	screen.GradationSpan(compute.Layer(buf), &screen.GradationParams{Width: 320, Step: 1}, &screen.GradationState{}, 0, 320)
 
 	// blurred = (0 + 0 + 128*2) / 4 = 256/4 = 64
-	r := uint8(buf[0] >> 16)
+	r := uint8(screen.ColorR(buf[0]))
 	if r != 64 {
 		t.Errorf("pixel 0 R=%d, want 64", r)
 	}
@@ -5070,31 +5255,33 @@ func TestGradation_OverridesExccen(t *testing.T) {
 	// BOKEN=1 + EXCCEN=1: extended CC should be disabled.
 	// Set up 3 layers: Green (pri=5), Red (pri=3), Blue (pri=1)
 	v := setupThreeNBGLayers(t, 5, 3, 1)
+	swr := newSoftwareRenderer(v)
 
 	// BOKEN=1 (bit 15), BOKN=5 (NBG2, bits 14:12=101), EXCCEN=1 (bit 10),
 	// N0CCEN=1 (bit 0), N1CCEN=1 (bit 1)
 	v.regs[vdp2CCCTL] = 0xD403 // BOKEN=1, BOKN=101(NBG2), EXCCEN=1, N0CCEN=1, N1CCEN=1
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// If EXCCEN were active, secondExt = (Red+Blue)/2.
 	// BOKEN overrides EXCCEN, so normal 2-layer CC at ratio 16.
-	// PDF: Green*15/32 + Red*17/32 = (135,119,0).
+	// PDF: Green*15/32 + Red*17/32 = (131,116,0).
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 134 || r > 136 || g < 118 || g > 120 || b != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want ~(135,119,0) - BOKEN should override EXCCEN", r, g, b)
+	if r < 130 || r > 132 || g < 115 || g > 117 || b != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want ~(131,116,0) - BOKEN should override EXCCEN", r, g, b)
 	}
 }
 
 func TestRenderDISPZeroBDCLMDZeroBlack(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// TVMD: DISP=0, BDCLMD=0 (all bits zero)
 	v.regs[vdp2TVMD] = 0x0000
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 	height := int(v.activeLines)
 
@@ -5111,6 +5298,7 @@ func TestRenderDISPZeroBDCLMDZeroBlack(t *testing.T) {
 
 func TestRenderDISPZeroBDCLMDOneIsBlack(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// TVMD: DISP=0, BDCLMD=1 (bit 8). Per the manual this would
 	// expose the back screen color across the picture, but real
 	// hardware blanks the analog output while DISP=0 — the back
@@ -5136,8 +5324,8 @@ func TestRenderDISPZeroBDCLMDOneIsBlack(t *testing.T) {
 	v.cram[2] = 0x00
 	v.cram[3] = 0x1F
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	r, g, b, a := fb[0], fb[1], fb[2], fb[3]
 	if r != 0 || g != 0 || b != 0 || a != 0xFF {
@@ -5148,6 +5336,7 @@ func TestRenderDISPZeroBDCLMDOneIsBlack(t *testing.T) {
 
 func TestSFCCMDMode0PerScreen(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	// SFCCMD mode 0 for all screens (default = per-screen from CCCTL)
 	v.regs[vdp2SFCCMD] = 0x0000
@@ -5155,8 +5344,8 @@ func TestSFCCMDMode0PerScreen(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio=16 (50%)
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// With CC enabled: output should be blended, not pure top layer
 	// NBG0 (top, pri=5) blended with NBG1 (second, pri=3) at 50%
@@ -5168,8 +5357,8 @@ func TestSFCCMDMode0PerScreen(t *testing.T) {
 
 	// Now disable CC for NBG0
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	fb = v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb = swr.framebuffer()
 
 	// Without CC: output should be pure top layer (NBG0)
 	r2 := fb[0]
@@ -5180,6 +5369,7 @@ func TestSFCCMDMode0PerScreen(t *testing.T) {
 
 func TestSFCCMDMode1PerCharacter(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	// SFCCMD mode 1 for NBG0, per-screen CC enabled (a precondition for every
 	// mode per manual Table 12.3).
@@ -5189,28 +5379,29 @@ func TestSFCCMDMode1PerCharacter(t *testing.T) {
 
 	// setupTwoNBGLayers uses 2-word patterns with MSW bit 12 (special CC bit)
 	// clear, so mode 1 must not calculate.
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("mode 1 special CC bit clear: layerCCBit should not be set")
 	}
 
 	// Set MSW bit 12 (special CC bit) -> mode 1 calculates.
 	v.vram[0] = 0x10
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit == 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit == 0 {
 		t.Error("mode 1 special CC bit set: layerCCBit not set")
 	}
 
 	// Clearing the per-screen enable suppresses it again.
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("mode 1 special CC bit set but N0CCEN=0: layerCCBit should not be set")
 	}
 }
 
 func TestSFCCMDMode3CRAMBitPalette(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 
 	// SFCCMD mode 3 for NBG0, per-screen CC enabled (a precondition for every
 	// mode per manual Table 12.3).
@@ -5222,32 +5413,33 @@ func TestSFCCMDMode3CRAMBitPalette(t *testing.T) {
 	// bit) on that entry; the color stays green.
 	v.cram[10*2] = 0x83 // was 0x03
 
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit == 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit == 0 {
 		t.Error("mode 3 CRAM MSB=1: layerCCBit not set")
 	}
 
 	// Clearing the per-screen enable suppresses CC even with the CRAM MSB set.
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("mode 3 CRAM MSB=1 but N0CCEN=0: layerCCBit should not be set")
 	}
 }
 
 func TestLayerCCBitDoesNotCorruptPriority(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Manually set a layer buffer entry with priority=7 (no CC bit, so no blend)
-	v.layerBufs[0][0] = uint32(7)<<24 | 0xFF0000 // red, pri=7, CC=0
-	v.regs[vdp2BGON] = 0x0001                    // NBG0 enabled
-	v.regs[vdp2PRINA] = 0x0007                   // pri=7
-	v.regs[vdp2CCCTL] = 0x0000                   // CC disabled per-screen
+	swr.in.Layers[0][0] = uint32(7)<<24 | screen.PackColor(255, 0, 0) // red, pri=7, CC=0
+	v.regs[vdp2BGON] = 0x0001                                         // NBG0 enabled
+	v.regs[vdp2PRINA] = 0x0007                                        // pri=7
+	v.regs[vdp2CCCTL] = 0x0000                                        // CC disabled per-screen
 
-	compositeTestFrame(v)
-	fb := v.Framebuffer()
+	compositeTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// Pixel should be red (from layerBuf) - verify priority bits aren't
+	// Pixel should be red (from the layer buffer) - verify priority bits aren't
 	// corrupted by the packed format.
 	r, g, b := fb[0], fb[1], fb[2]
 	if r != 255 || g != 0 || b != 0 {
@@ -5265,21 +5457,21 @@ func TestDecodeSpritePixel8BitType8(t *testing.T) {
 	// Pixel 0x80: PR0=1 -> prBits=1 -> register 1 -> priority 5
 	// DC = 0x00 -> CRAM[0]
 	v.BeginFrame()
-	pri, _, _, _, _, _ := v.decodeSpritePixel(0x0080)
+	pri, _, _, _, _, _ := decodeSpriteTest(v, 0x0080)
 	if pri != 5 {
 		t.Errorf("type 8 pixel 0x80: priority = %d, want 5", pri)
 	}
 
 	// Pixel 0x7F: PR0=0 -> prBits=0 -> register 0 -> priority 3
 	v.BeginFrame()
-	pri2, _, _, _, _, _ := v.decodeSpritePixel(0x007F)
+	pri2, _, _, _, _, _ := decodeSpriteTest(v, 0x007F)
 	if pri2 != 3 {
 		t.Errorf("type 8 pixel 0x7F: priority = %d, want 3", pri2)
 	}
 
 	// Pixel 0x00: transparent
 	v.BeginFrame()
-	pri3, _, _, _, _, _ := v.decodeSpritePixel(0x0000)
+	pri3, _, _, _, _, _ := decodeSpriteTest(v, 0x0000)
 	if pri3 != 0 {
 		t.Errorf("type 8 pixel 0x00: priority = %d, want 0 (transparent)", pri3)
 	}
@@ -5294,15 +5486,15 @@ func TestDecodeSpritePixelMixedRGBSpriteWindow(t *testing.T) {
 
 	// 0x8000 is the erase value (MSB set, low 15 bits zero). With the sprite
 	// window enabled it is transparent (priority 0), not opaque RGB black.
-	if pri, _, _, _, _, _ := v.decodeSpritePixel(0x8000); pri != 0 {
+	if pri, _, _, _, _, _ := decodeSpriteTest(v, 0x8000); pri != 0 {
 		t.Errorf("0x8000 with SPWINEN: priority = %d, want 0 (transparent)", pri)
 	}
 
 	// A genuine RGB pixel (non-zero low 15 bits) stays opaque RGB at the
 	// sprite register 0 priority.
-	pri, _, msb, r, g, b := v.decodeSpritePixel(0xFFFF)
-	if pri != 4 || !msb || r != 255 || g != 255 || b != 255 {
-		t.Errorf("0xFFFF with SPWINEN: pri=%d msb=%v rgb=(%d,%d,%d), want pri=4 msb=true rgb=(255,255,255)",
+	pri, _, msb, r, g, b := decodeSpriteTest(v, 0xFFFF)
+	if pri != 4 || !msb || r != 248 || g != 248 || b != 248 {
+		t.Errorf("0xFFFF with SPWINEN: pri=%d msb=%v rgb=(%d,%d,%d), want pri=4 msb=true rgb=(248,248,248)",
 			pri, msb, r, g, b)
 	}
 
@@ -5310,7 +5502,7 @@ func TestDecodeSpritePixelMixedRGBSpriteWindow(t *testing.T) {
 	// mixed-mode behavior is unchanged).
 	v.regs[vdp2SPCTL] = 0x0026 // type 6, SPCLMD set, SPWINEN clear
 	v.BeginFrame()
-	pri2, _, msb2, r2, g2, b2 := v.decodeSpritePixel(0x8000)
+	pri2, _, msb2, r2, g2, b2 := decodeSpriteTest(v, 0x8000)
 	if pri2 != 4 || !msb2 || r2 != 0 || g2 != 0 || b2 != 0 {
 		t.Errorf("0x8000 without SPWINEN: pri=%d msb=%v rgb=(%d,%d,%d), want pri=4 msb=true rgb=(0,0,0)",
 			pri2, msb2, r2, g2, b2)
@@ -5325,14 +5517,14 @@ func TestDecodeSpritePixel8BitTypeA(t *testing.T) {
 
 	// Pixel 0xC0: PR1=1,PR0=1 -> prBits=3 -> register 3 -> priority 4
 	v.BeginFrame()
-	pri, _, _, _, _, _ := v.decodeSpritePixel(0x00C0)
+	pri, _, _, _, _, _ := decodeSpriteTest(v, 0x00C0)
 	if pri != 4 {
 		t.Errorf("type A pixel 0xC0: priority = %d, want 4", pri)
 	}
 
 	// Pixel 0x80: PR1=1,PR0=0 -> prBits=2 -> register 2 -> priority 3
 	v.BeginFrame()
-	pri2, _, _, _, _, _ := v.decodeSpritePixel(0x0080)
+	pri2, _, _, _, _, _ := decodeSpriteTest(v, 0x0080)
 	if pri2 != 3 {
 		t.Errorf("type A pixel 0x80: priority = %d, want 3", pri2)
 	}
@@ -5345,7 +5537,7 @@ func TestDecodeSpritePixel8BitTypeB_NoPR(t *testing.T) {
 
 	// Pixel 0xC0: CC1=1,CC0=1, PR=0 -> prBits=0 -> register 0 -> priority 5
 	v.BeginFrame()
-	pri, _, _, _, _, _ := v.decodeSpritePixel(0x00C0)
+	pri, _, _, _, _, _ := decodeSpriteTest(v, 0x00C0)
 	if pri != 5 {
 		t.Errorf("type B pixel 0xC0: priority = %d, want 5 (always reg 0)", pri)
 	}
@@ -5362,7 +5554,7 @@ func TestDecodeSpritePixel8BitTypeC_Shared(t *testing.T) {
 	v.cram[(0x85*2+1)&(vdp2CRAMSize-1)] = 0x1F // red
 
 	v.BeginFrame()
-	pri, _, _, cr, _, _ := v.decodeSpritePixel(0x0085)
+	pri, _, _, cr, _, _ := decodeSpriteTest(v, 0x0085)
 	// SP0=1 (bit 7), prBits=1, register 1, priority=6
 	if pri != 6 {
 		t.Errorf("type C pixel 0x85: priority = %d, want 6", pri)
@@ -5382,13 +5574,13 @@ func TestDecodeSpritePixel16BitDCMask(t *testing.T) {
 	// Pixel: SD=1(b15), PR=7(b14:12=111), CC=7(b11:9=111), DC=0x1FF(b8:0)
 	pixel := uint16(0xFFFF)
 	v.BeginFrame()
-	_, _, _, _, _, _ = v.decodeSpritePixel(pixel)
+	_, _, _, _, _, _ = decodeSpriteTest(v, pixel)
 	// Just verify it doesn't crash and uses correct mask
 
 	// Type 4: 10 DC bits (mask 0x03FF)
 	v.regs[vdp2SPCTL] = 0x0004
 	v.BeginFrame()
-	_, _, _, _, _, _ = v.decodeSpritePixel(0x7FFF)
+	_, _, _, _, _, _ = decodeSpriteTest(v, 0x7FFF)
 }
 
 func TestSpriteCCBitsType0(t *testing.T) {
@@ -5400,7 +5592,7 @@ func TestSpriteCCBitsType0(t *testing.T) {
 	// CC bits at b13:11 = 101 = 5, 3 CC bits -> no padding -> ccBits=5
 	pixel := uint16(0x2800) // b13=1, b11=1 -> CC=101=5
 	v.BeginFrame()
-	_, ccBits, _, _, _, _ := v.decodeSpritePixel(pixel)
+	_, ccBits, _, _, _, _ := decodeSpriteTest(v, pixel)
 	if ccBits != 5 {
 		t.Errorf("type 0 ccBits = %d, want 5", ccBits)
 	}
@@ -5413,7 +5605,7 @@ func TestSpriteCCBitsType1(t *testing.T) {
 	// CC at b12:11 = 11 = 3, 2 visible bits placed in low positions.
 	pixel := uint16(0x1800) // b12=1, b11=1
 	v.BeginFrame()
-	_, ccBits, _, _, _, _ := v.decodeSpritePixel(pixel)
+	_, ccBits, _, _, _, _ := decodeSpriteTest(v, pixel)
 	if ccBits != 3 {
 		t.Errorf("type 1 ccBits = %d, want 3", ccBits)
 	}
@@ -5426,7 +5618,7 @@ func TestSpriteCCBitsType5(t *testing.T) {
 	// CC at b11 = 1, 1 visible bit placed at position 0.
 	pixel := uint16(0x0800) // b11=1
 	v.BeginFrame()
-	_, ccBits, _, _, _, _ := v.decodeSpritePixel(pixel)
+	_, ccBits, _, _, _, _ := decodeSpriteTest(v, pixel)
 	if ccBits != 1 {
 		t.Errorf("type 5 ccBits = %d, want 1", ccBits)
 	}
@@ -5438,7 +5630,7 @@ func TestSpriteCCBits8BitType9(t *testing.T) {
 
 	// Pixel 0x40: PR0=0, CC0=1(b6). 1 visible CC bit at position 0.
 	v.BeginFrame()
-	_, ccBits, _, _, _, _ := v.decodeSpritePixel(0x0040)
+	_, ccBits, _, _, _, _ := decodeSpriteTest(v, 0x0040)
 	if ccBits != 1 {
 		t.Errorf("type 9 ccBits = %d, want 1", ccBits)
 	}
@@ -5450,7 +5642,7 @@ func TestSpriteCCBits8BitTypeB(t *testing.T) {
 
 	// Pixel 0xC0: CC1=1,CC0=1(b7:6). 2 visible CC bits in low positions.
 	v.BeginFrame()
-	_, ccBits, _, _, _, _ := v.decodeSpritePixel(0x00C0)
+	_, ccBits, _, _, _, _ := decodeSpriteTest(v, 0x00C0)
 	if ccBits != 3 {
 		t.Errorf("type B ccBits = %d, want 3", ccBits)
 	}
@@ -5472,7 +5664,7 @@ func TestGetSpriteCCRatio(t *testing.T) {
 	}
 	for _, tc := range tests {
 		v.BeginFrame()
-		got := v.getSpriteCCRatio(tc.ccBits)
+		got := int(spriteDecodeOf(v).Ratio[tc.ccBits])
 		if got != tc.want {
 			t.Errorf("getSpriteCCRatio(%d) = %d, want %d", tc.ccBits, got, tc.want)
 		}
@@ -5486,15 +5678,15 @@ func TestSPCCCS0_PriorityLessOrEqual(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0040 // SPCCEN=1
 
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(2, false) {
+	if !spriteDecodeOf(v).CCEnabled(2, false) {
 		t.Error("SPCCCS=0: priority 2 <= 3, should enable CC")
 	}
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(3, false) {
+	if !spriteDecodeOf(v).CCEnabled(3, false) {
 		t.Error("SPCCCS=0: priority 3 <= 3, should enable CC")
 	}
 	v.BeginFrame()
-	if v.isSpritePixelCCEnabled(4, false) {
+	if spriteDecodeOf(v).CCEnabled(4, false) {
 		t.Error("SPCCCS=0: priority 4 > 3, should disable CC")
 	}
 }
@@ -5505,11 +5697,11 @@ func TestSPCCCS1_PriorityEqual(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0040
 
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(5, false) {
+	if !spriteDecodeOf(v).CCEnabled(5, false) {
 		t.Error("SPCCCS=1: priority 5 == 5, should enable CC")
 	}
 	v.BeginFrame()
-	if v.isSpritePixelCCEnabled(4, false) {
+	if spriteDecodeOf(v).CCEnabled(4, false) {
 		t.Error("SPCCCS=1: priority 4 != 5, should disable CC")
 	}
 }
@@ -5520,15 +5712,15 @@ func TestSPCCCS2_PriorityGreaterOrEqual(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0040
 
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(4, false) {
+	if !spriteDecodeOf(v).CCEnabled(4, false) {
 		t.Error("SPCCCS=2: priority 4 >= 3, should enable CC")
 	}
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(3, false) {
+	if !spriteDecodeOf(v).CCEnabled(3, false) {
 		t.Error("SPCCCS=2: priority 3 >= 3, should enable CC")
 	}
 	v.BeginFrame()
-	if v.isSpritePixelCCEnabled(2, false) {
+	if spriteDecodeOf(v).CCEnabled(2, false) {
 		t.Error("SPCCCS=2: priority 2 < 3, should disable CC")
 	}
 }
@@ -5539,11 +5731,11 @@ func TestSPCCCS3_ColorMSB(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0040
 
 	v.BeginFrame()
-	if !v.isSpritePixelCCEnabled(5, true) {
+	if !spriteDecodeOf(v).CCEnabled(5, true) {
 		t.Error("SPCCCS=3: colorMSB=true, should enable CC")
 	}
 	v.BeginFrame()
-	if v.isSpritePixelCCEnabled(5, false) {
+	if spriteDecodeOf(v).CCEnabled(5, false) {
 		t.Error("SPCCCS=3: colorMSB=false, should disable CC")
 	}
 }
@@ -5554,7 +5746,7 @@ func TestSPCCCS_SPCCENDisabled(t *testing.T) {
 	v.regs[vdp2CCCTL] = 0x0000 // SPCCEN=0
 
 	v.BeginFrame()
-	if v.isSpritePixelCCEnabled(2, false) {
+	if spriteDecodeOf(v).CCEnabled(2, false) {
 		t.Error("SPCCEN=0: CC should be disabled regardless of condition")
 	}
 }
@@ -5571,7 +5763,7 @@ func TestSpriteCRAMOffset_Zero(t *testing.T) {
 
 	// Pixel: PR=0, CC=0, DC=5
 	v.BeginFrame()
-	_, _, _, _, _, sb := v.decodeSpritePixel(0x0005)
+	_, _, _, _, _, sb := decodeSpriteTest(v, 0x0005)
 	if sb == 0 {
 		t.Error("sprite CRAM offset 0: should read color from CRAM[5]")
 	}
@@ -5590,7 +5782,7 @@ func TestSpriteCRAMOffset_NonZero(t *testing.T) {
 	v.cram[addr+1] = 0x1F // red
 
 	v.BeginFrame()
-	_, _, _, cr, _, _ := v.decodeSpritePixel(0x0005)
+	_, _, _, cr, _, _ := decodeSpriteTest(v, 0x0005)
 	if cr == 0 {
 		t.Error("sprite CRAM offset 2: should read from CRAM[517], expect red")
 	}
@@ -5660,22 +5852,20 @@ func setupRBG1Identity(t *testing.T) *VDP2 {
 
 func TestRBG1EnableRequiresRBG0(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// R1ON=1 but R0ON=0
 	v.regs[vdp2BGON] = 1 << 5
 	v.regs[vdp2PRINA] = 0x0003
 
-	renderTestFrame(v)
-
-	// rbg1Buf should be empty since RBG0 is not enabled
-	for i := 0; i < int(v.activeWidth); i++ {
-		if v.rbg1Buf[i] != 0 {
-			t.Fatalf("rbg1Buf[%d] = 0x%08X, want 0 (RBG0 not enabled)", i, v.rbg1Buf[i])
-		}
+	// The RBG1 buffer should be empty since RBG0 is not enabled
+	if !layerFrameEmpty(v, swr, screen.LayerRBG1) {
+		t.Fatal("RBG1 buffer holds a dot, want none (RBG0 not enabled)")
 	}
 }
 
 func TestRBG1EnableDisablesNBG(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// Enable NBG0 + RBG0 + RBG1
 	v.regs[vdp2BGON] = 0x0001 | (1 << 4) | (1 << 5)
 	v.regs[vdp2PRINA] = 0x0003
@@ -5685,18 +5875,15 @@ func TestRBG1EnableDisablesNBG(t *testing.T) {
 	v.regs[vdp2CHCTLA] = 0x0000
 	v.regs[vdp2PNCN0] = 0x8000
 
-	renderTestFrame(v)
-
 	// NBG0 layer buffer should be cleared when RBG1 is active
-	for i := 0; i < int(v.activeWidth); i++ {
-		if v.layerBufs[0][i] != 0 {
-			t.Fatalf("layerBufs[0][%d] = 0x%08X, want 0 (NBG disabled by RBG1)", i, v.layerBufs[0][i])
-		}
+	if !layerFrameEmpty(v, swr, 0) {
+		t.Fatal("NBG0 buffer holds a dot, want none (NBG disabled by RBG1)")
 	}
 }
 
 func TestRBG1BasicRender(t *testing.T) {
 	v := setupRBG1Identity(t)
+	swr := newSoftwareRenderer(v)
 
 	// Write a 2-word pattern name at entry (0,0) for param B map.
 	// Pattern name table is at page boundary for plane A of param B.
@@ -5714,10 +5901,10 @@ func TestRBG1BasicRender(t *testing.T) {
 	v.cram[2] = 0x00
 	v.cram[3] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// RBG1 uses PRINA priority = 3
-	px := v.rbg1Buf[0]
+	px := renderedLayerDot(v, swr, screen.LayerRBG1, 0, 0)
 	pri := uint8((px >> 24) & 0x07)
 	if pri != 3 {
 		t.Errorf("RBG1 pixel priority = %d, want 3", pri)
@@ -5729,6 +5916,7 @@ func TestRBG1BasicRender(t *testing.T) {
 
 func TestRBG1Compositing(t *testing.T) {
 	v := setupRBG1Identity(t)
+	swr := newSoftwareRenderer(v)
 
 	// Set RBG1 priority higher than RBG0
 	v.regs[vdp2PRINA] = 0x0005 // RBG1 priority = 5
@@ -5749,8 +5937,8 @@ func TestRBG1Compositing(t *testing.T) {
 	// Actually both share PNCR and map regs at page 0, so they read the same pattern.
 	// RBG0 with lower priority will be behind RBG1.
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// Output should show RBG1's color (red) since it has higher priority
 	r := fb[0]
@@ -5761,6 +5949,7 @@ func TestRBG1Compositing(t *testing.T) {
 
 func TestRBG1NBGDisabledInOutput(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 + RBG0 + RBG1
 	v.regs[vdp2BGON] = 0x0001 | (1 << 4) | (1 << 5)
@@ -5776,18 +5965,9 @@ func TestRBG1NBGDisabledInOutput(t *testing.T) {
 	v.cram[2] = 0x03
 	v.cram[3] = 0xE0
 
-	renderTestFrame(v)
-
 	// With RBG1 active, NBG0 should NOT appear.
-	// layerBufs[0] should be empty.
-	allZero := true
-	for i := 0; i < int(v.activeWidth)*int(v.activeLines); i++ {
-		if v.layerBufs[0][i] != 0 {
-			allZero = false
-			break
-		}
-	}
-	if !allZero {
+	// The NBG0 buffer should be empty.
+	if !layerFrameEmpty(v, swr, 0) {
 		t.Error("NBG0 layer buffer should be cleared when RBG1 is active")
 	}
 }
@@ -5796,6 +5976,7 @@ func TestRBG1NBGDisabledInOutput(t *testing.T) {
 
 func TestRender640Width(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// DISP=1 + HRESO=010 (640 Hi-Res A)
 	v.Write(0x0000, 0x8002)
 
@@ -5803,7 +5984,7 @@ func TestRender640Width(t *testing.T) {
 	v.vram[0] = 0xFF
 	v.vram[1] = 0xFF
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	stride := v.FramebufferStride()
 	if stride != 640*4 {
@@ -5811,7 +5992,7 @@ func TestRender640Width(t *testing.T) {
 	}
 
 	// Check pixel at x=639, y=0 (last pixel of first row)
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	off := 639 * 4
 	if fb[off] == 0 && fb[off+1] == 0 && fb[off+2] == 0 {
 		t.Error("pixel at x=639 should not be black in 640-wide mode")
@@ -5820,20 +6001,21 @@ func TestRender640Width(t *testing.T) {
 
 func TestHiResExccenDisabled(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.Write(0x0000, 0x8002) // DISP=1 + 640 mode
 
 	// Set EXCCEN
 	v.regs[vdp2CCCTL] = 0x0400 // bit 10 = EXCCEN
 
 	// Manually set layer buffers with two layers at different priorities
-	v.layerBufs[0][0] = uint32(5)<<24 | layerCCBit | 0xFF0000 // red, pri=5, CC=1
-	v.layerBufs[1][0] = uint32(3)<<24 | layerCCBit | 0x00FF00 // green, pri=3, CC=1
+	swr.in.Layers[0][0] = uint32(5)<<24 | layerCCBit | screen.PackColor(255, 0, 0) // red, pri=5, CC=1
+	swr.in.Layers[1][0] = uint32(3)<<24 | layerCCBit | screen.PackColor(0, 255, 0) // green, pri=3, CC=1
 
 	v.regs[vdp2BGON] = 0x0003
 	v.regs[vdp2PRINA] = 0x0305
 
-	compositeTestFrame(v)
-	fb := v.Framebuffer()
+	compositeTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// In hi-res mode, EXCCEN should be disabled. Normal 2-layer CC still
 	// applies with ratio 0 per PDF: top*31/32 + sec*1/32 = (247,7,0).
@@ -5851,9 +6033,9 @@ func TestClassifyShadow_Normal(t *testing.T) {
 	// Normal shadow for type 2: SD=1 (bit 15), DC bits 10:1 all 1, bit 0 = 0
 	// pixel = 0x87FE (bit 15=1, bits 10:0 = 0x7FE)
 	v.BeginFrame()
-	result := v.classifyShadow(0x87FE)
-	if result != shadowNormal {
-		t.Errorf("classifyShadow(0x87FE) = %d, want %d (shadowNormal)", result, shadowNormal)
+	result := shadowTest(v, 0x87FE)
+	if result != screen.ShadowNormal {
+		t.Errorf("classifyShadow(0x87FE) = %d, want %d (screen.ShadowNormal)", result, screen.ShadowNormal)
 	}
 }
 
@@ -5862,9 +6044,9 @@ func TestClassifyShadow_MSBSprite(t *testing.T) {
 	v.regs[vdp2SPCTL] = 0x0002 // type 2
 	// MSB=1, remaining bits non-zero but not matching normal shadow
 	v.BeginFrame()
-	result := v.classifyShadow(0x8001)
-	if result != shadowMSBSprite {
-		t.Errorf("classifyShadow(0x8001) = %d, want %d (shadowMSBSprite)", result, shadowMSBSprite)
+	result := shadowTest(v, 0x8001)
+	if result != screen.ShadowMSBSprite {
+		t.Errorf("classifyShadow(0x8001) = %d, want %d (screen.ShadowMSBSprite)", result, screen.ShadowMSBSprite)
 	}
 }
 
@@ -5874,9 +6056,9 @@ func TestClassifyShadow_MSBTransparent(t *testing.T) {
 	v.regs[vdp2SDCTL] = 0x0100 // TPSDSL = 1 (bit 8)
 	// Transparent shadow: pixel = 0x8000 (MSB=1, rest=0)
 	v.BeginFrame()
-	result := v.classifyShadow(0x8000)
-	if result != shadowMSBTransp {
-		t.Errorf("classifyShadow(0x8000) = %d, want %d (shadowMSBTransp)", result, shadowMSBTransp)
+	result := shadowTest(v, 0x8000)
+	if result != screen.ShadowMSBTransp {
+		t.Errorf("classifyShadow(0x8000) = %d, want %d (screen.ShadowMSBTransp)", result, screen.ShadowMSBTransp)
 	}
 }
 
@@ -5885,9 +6067,25 @@ func TestClassifyShadow_MSBTransparentDisabled(t *testing.T) {
 	v.regs[vdp2SPCTL] = 0x0002
 	v.regs[vdp2SDCTL] = 0x0000 // TPSDSL = 0
 	v.BeginFrame()
-	result := v.classifyShadow(0x8000)
-	if result != shadowMSBNull {
-		t.Errorf("classifyShadow(0x8000) with TPSDSL=0 = %d, want %d (shadowMSBNull)", result, shadowMSBNull)
+	result := shadowTest(v, 0x8000)
+	if result != screen.ShadowMSBNull {
+		t.Errorf("classifyShadow(0x8000) with TPSDSL=0 = %d, want %d (screen.ShadowMSBNull)", result, screen.ShadowMSBNull)
+	}
+}
+
+func TestClassifyShadow_SpriteWindowNoMSBShadow(t *testing.T) {
+	v := newTestVDP2()
+	v.regs[vdp2SPCTL] = 0x0012 // SPWINEN = 1, type 2
+	v.regs[vdp2SDCTL] = 0x0100 // TPSDSL = 1
+	v.BeginFrame()
+	for _, pixel := range []uint16{0x8001, 0x8000} {
+		if result := shadowTest(v, pixel); result != screen.ShadowNone {
+			t.Errorf("classifyShadow(%#x) with SPWINEN=1 = %d, want %d (screen.ShadowNone)", pixel, result, screen.ShadowNone)
+		}
+	}
+	// Normal shadow is judged from the dot color field and is not the MSB.
+	if result := shadowTest(v, 0x87FE); result != screen.ShadowNormal {
+		t.Errorf("classifyShadow(0x87FE) with SPWINEN=1 = %d, want %d (screen.ShadowNormal)", result, screen.ShadowNormal)
 	}
 }
 
@@ -5897,13 +6095,13 @@ func TestClassifyShadow_NormalPrecedence(t *testing.T) {
 	// This pixel has MSB=1 AND matches normal shadow pattern for type 2
 	// Normal shadow should take precedence
 	v.BeginFrame()
-	result := v.classifyShadow(0xFFFF & ^uint16(1) | 0x8000) // all bits except bit 0 = 0x FFFE | 0x8000
+	result := shadowTest(v, 0xFFFF & ^uint16(1) | 0x8000) // all bits except bit 0 = 0x FFFE | 0x8000
 	// For type 2: DC bits = pixel & 0x07FF. pixel & 0x07FF = 0x07FE -> normal shadow
 	pixel := uint16(0xFFFF &^ 1)
 	v.BeginFrame()
-	result = v.classifyShadow(pixel)
-	if result != shadowNormal {
-		t.Errorf("classifyShadow normal precedence = %d, want %d", result, shadowNormal)
+	result = shadowTest(v, pixel)
+	if result != screen.ShadowNormal {
+		t.Errorf("classifyShadow normal precedence = %d, want %d", result, screen.ShadowNormal)
 	}
 }
 
@@ -5914,9 +6112,9 @@ func TestClassifyShadow_MixedModePaletteNormal(t *testing.T) {
 	// Palette pixel (bit 15 = 0) matching the type-2 normal-shadow DC
 	// pattern. Mixed mode forces only the MSB to 0, so the DC-based
 	// normal shadow still applies.
-	result := v.classifyShadow(0x07FE)
-	if result != shadowNormal {
-		t.Errorf("classifyShadow(0x07FE) mixed = %d, want %d (shadowNormal)", result, shadowNormal)
+	result := shadowTest(v, 0x07FE)
+	if result != screen.ShadowNormal {
+		t.Errorf("classifyShadow(0x07FE) mixed = %d, want %d (screen.ShadowNormal)", result, screen.ShadowNormal)
 	}
 }
 
@@ -5925,9 +6123,9 @@ func TestClassifyShadow_MixedModeRGBNoShadow(t *testing.T) {
 	v.regs[vdp2SPCTL] = 0x0022 // type 2, mixed
 	v.BeginFrame()
 	// RGB pixel (bit 15 = 1) - shadow bits considered 0, never shadows.
-	result := v.classifyShadow(0x8001)
-	if result != shadowNone {
-		t.Errorf("classifyShadow(0x8001) mixed RGB = %d, want %d (shadowNone)", result, shadowNone)
+	result := shadowTest(v, 0x8001)
+	if result != screen.ShadowNone {
+		t.Errorf("classifyShadow(0x8001) mixed RGB = %d, want %d (screen.ShadowNone)", result, screen.ShadowNone)
 	}
 }
 
@@ -5937,9 +6135,9 @@ func TestClassifyShadow_MixedModeNoMSBShadow(t *testing.T) {
 	v.BeginFrame()
 	// Palette pixel (bit 15 = 0) that is not a normal shadow. MSB shadow
 	// is unavailable in mixed mode (the MSB is the format discriminator).
-	result := v.classifyShadow(0x0001)
-	if result != shadowNone {
-		t.Errorf("classifyShadow(0x0001) mixed = %d, want %d (shadowNone)", result, shadowNone)
+	result := shadowTest(v, 0x0001)
+	if result != screen.ShadowNone {
+		t.Errorf("classifyShadow(0x0001) mixed = %d, want %d (screen.ShadowNone)", result, screen.ShadowNone)
 	}
 }
 
@@ -5969,6 +6167,12 @@ func TestDecodeColorMode16M_NBG1(t *testing.T) {
 	}
 }
 
+// testCoefficient reads a coefficient table entry through the compute
+// package from the VDP2's VRAM, or its CRAM when fromCRAM.
+func testCoefficient(v *VDP2, addr uint32, oneWord, mode3, fromCRAM bool) (int64, bool, uint32) {
+	return screen.Coefficient((*compute.VDP2VRAM)(v.vram), (*compute.CRAM)(v.cram), addr, oneWord, mode3, fromCRAM)
+}
+
 func TestReadCoefficient_CRKTE(t *testing.T) {
 	v := newTestVDP2()
 	// Set CRKTE=1 (RAMCTL bit 15), CRAM mode 1 (bits 13:12=01)
@@ -5982,7 +6186,7 @@ func TestReadCoefficient_CRKTE(t *testing.T) {
 	v.cram[0x801] = 0x00
 
 	v.BeginFrame()
-	val, msb, _ := v.readCoefficient(0, true, false, true)
+	val, msb, _ := testCoefficient(v, 0, true, false, true)
 	if msb {
 		t.Error("coefficient MSB should be 0")
 	}
@@ -6002,7 +6206,7 @@ func TestReadCoefficient_VRAM_Regression(t *testing.T) {
 	v.vram[1] = 0x00
 
 	v.BeginFrame()
-	val, msb, _ := v.readCoefficient(0, true, false, false)
+	val, msb, _ := testCoefficient(v, 0, true, false, false)
 	if msb {
 		t.Error("coefficient MSB should be 0")
 	}
@@ -6025,7 +6229,7 @@ func TestReadCoefficient_2Word_LineColorBits(t *testing.T) {
 	v.vram[3] = 0x00
 
 	v.BeginFrame()
-	val, msb, lc := v.readCoefficient(0, false, false, false)
+	val, msb, lc := testCoefficient(v, 0, false, false, false)
 	if msb {
 		t.Error("MSB should be 0")
 	}
@@ -6039,7 +6243,7 @@ func TestReadCoefficient_2Word_LineColorBits(t *testing.T) {
 
 	// 2-word mode 3: same first word layout for line color
 	v.BeginFrame()
-	val, msb, lc = v.readCoefficient(0, false, true, false)
+	val, msb, lc = testCoefficient(v, 0, false, true, false)
 	if msb {
 		t.Error("mode3 MSB should be 0")
 	}
@@ -6058,13 +6262,13 @@ func TestReadCoefficient_1Word_NoLineColorBits(t *testing.T) {
 	v.vram[1] = 0x00
 
 	v.BeginFrame()
-	_, _, lc := v.readCoefficient(0, true, false, false)
+	_, _, lc := testCoefficient(v, 0, true, false, false)
 	if lc != 0 {
 		t.Errorf("1-word line color bits = 0x%02X, want 0", lc)
 	}
 
 	v.BeginFrame()
-	_, _, lc = v.readCoefficient(0, true, true, false)
+	_, _, lc = testCoefficient(v, 0, true, true, false)
 	if lc != 0 {
 		t.Errorf("1-word mode3 line color bits = 0x%02X, want 0", lc)
 	}
@@ -6177,6 +6381,7 @@ func TestZMCTLNoClampExpansion(t *testing.T) {
 
 func TestBackScreenColorOffsetA(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set back screen to pure red: RGB555 0x001F (R=31,G=0,B=0) with
 	// the opacity bit 15 set. VRAM big-endian: high byte first.
@@ -6192,13 +6397,12 @@ func TestBackScreenColorOffsetA(t *testing.T) {
 	// No layers enabled
 	v.regs[vdp2BGON] = 0x0000
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	// Back screen: R=31*8+7=255, G=0, B=0 (rgb555ToRGB expands 5-bit to 8-bit)
-	// After offset: R=min(255+10,255)=255, G=0+20=20, B=0+30=30
-	r := v.framebuffer[0]
-	g := v.framebuffer[1]
-	b := v.framebuffer[2]
+	// Back screen: R=31<<3=248, G=0, B=0 (5-bit channel, low 3 bits zero)
+	// After offset: R=min(248+10,255)=255, G=0+20=20, B=0+30=30
+	fb := swr.framebuffer()
+	r, g, b := fb[0], fb[1], fb[2]
 	if r != 255 || g != 20 || b != 30 {
 		t.Errorf("back screen + offset = (%d,%d,%d), want (255,20,30)", r, g, b)
 	}
@@ -6206,6 +6410,7 @@ func TestBackScreenColorOffsetA(t *testing.T) {
 
 func TestBackScreenColorOffsetDisabled(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Back screen = pure red
 	writeVRAM16(v, 0, 0x801F)
@@ -6215,18 +6420,19 @@ func TestBackScreenColorOffsetDisabled(t *testing.T) {
 	v.regs[vdp2COAR] = 50
 	v.regs[vdp2BGON] = 0x0000
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	r := v.framebuffer[0]
-	g := v.framebuffer[1]
-	// No offset: R=255, G=0
-	if r != 255 || g != 0 {
-		t.Errorf("back screen no offset = R=%d G=%d, want R=255 G=0", r, g)
+	fb := swr.framebuffer()
+	r, g := fb[0], fb[1]
+	// No offset: R=248, G=0
+	if r != 248 || g != 0 {
+		t.Errorf("back screen no offset = R=%d G=%d, want R=248 G=0", r, g)
 	}
 }
 
 func TestSpriteColorOffsetBitFix(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	v.regs[vdp2BGON] = 0x0000
 	v.regs[vdp2SPCTL] = 0x0000 // type 0
@@ -6253,23 +6459,21 @@ func TestSpriteColorOffsetBitFix(t *testing.T) {
 	v.regs[vdp2COAG] = 20
 	v.regs[vdp2COAB] = 20
 
-	renderTestFrameFB(v, fbView)
+	renderTestFrameFB(v, swr, fbView)
 
-	r := v.framebuffer[0]
-	// R = 12*8+7 = 103 (rgb555 expansion: 12<<3|12>>2 = 96+3 = 99)
-	// Actually rgb555ToRGB: r5=12, r=(12<<3)|(12>>2) = 96+3 = 99
-	// After offset: 99+20 = 119
-	// Let's just check that offset IS applied (r > 99)
-	baseR := uint8((12 << 3) | (12 >> 2)) // 99
+	r := swr.framebuffer()[0]
+	// R = 12<<3 = 96 (5-bit channel, low 3 bits zero)
+	// After offset: 96+20 = 116
+	baseR := uint8(12 << 3) // 96
 	if r != baseR+20 {
 		t.Errorf("sprite with CLOFEN bit6: R=%d, want %d", r, baseR+20)
 	}
 
 	// Now set CLOFEN to bit 5 only (back screen), sprite should NOT get offset
 	v.regs[vdp2CLOFEN] = 1 << 5
-	renderTestFrameFB(v, fbView)
+	renderTestFrameFB(v, swr, fbView)
 
-	r2 := v.framebuffer[0]
+	r2 := swr.framebuffer()[0]
 	if r2 != baseR {
 		t.Errorf("sprite with only CLOFEN bit5: R=%d, want %d (no sprite offset)", r2, baseR)
 	}
@@ -6303,7 +6507,7 @@ func TestRBG0MosaicHorizontal(t *testing.T) {
 		v.cram[cramIdx*2+1] = 0x00
 	}
 
-	buf := make([]uint32, maxWidth*maxHeight)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
 
 	// With mosaic H=4, pixels 0-3 should all sample from source x=0
@@ -6345,7 +6549,7 @@ func TestCRKTERequiresCRAMMode1(t *testing.T) {
 
 	fromCRAM := v.regs[vdp2RAMCTL]&0x8000 != 0 && v.cramMode() == 1
 	v.BeginFrame()
-	val, _, _ := v.readCoefficient(0, true, false, fromCRAM)
+	val, _, _ := testCoefficient(v, 0, true, false, fromCRAM)
 	// Should read from VRAM since CRAM mode != 1
 	if val != 0x10000 {
 		t.Errorf("CRKTE with mode 0: coefficient = 0x%X, want 0x10000 (from VRAM)", val)
@@ -6365,7 +6569,7 @@ func TestCRKTEWithMode1Works(t *testing.T) {
 
 	fromCRAM := v.regs[vdp2RAMCTL]&0x8000 != 0 && v.cramMode() == 1
 	v.BeginFrame()
-	val, _, _ := v.readCoefficient(0, true, false, fromCRAM)
+	val, _, _ := testCoefficient(v, 0, true, false, fromCRAM)
 	// 2.0 in .16 FP = 0x20000
 	if val != 0x20000 {
 		t.Errorf("CRKTE with mode 1: coefficient = 0x%X, want 0x20000 (from CRAM)", val)
@@ -6409,73 +6613,78 @@ func setupNBG0WithBackScreen(t *testing.T) *VDP2 {
 
 func TestBackScreenAsSecondImageCC(t *testing.T) {
 	v := setupNBG0WithBackScreen(t)
+	swr := newSoftwareRenderer(v)
 
 	// Enable CC for NBG0, ratio=16 (50/50 blend)
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN=1
 	v.regs[vdp2CCRNA] = 16     // NBG0 ratio = 16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// NBG0 = red (255,0,0), back screen = green (0,255,0).
-	// PDF ratio 16: R = 255*15/32 = 119, G = 255*17/32 = 135.
+	// NBG0 = red (248,0,0), back screen = green (0,248,0).
+	// PDF ratio 16: R = 248*15/32 = 116, G = 248*17/32 = 131.
 	r, g, b := fb[0], fb[1], fb[2]
-	if r < 118 || r > 120 || g < 134 || g > 136 || b != 0 {
-		t.Errorf("back screen CC blend = (%d,%d,%d), want ~(119,135,0)", r, g, b)
+	if r < 115 || r > 117 || g < 130 || g > 132 || b != 0 {
+		t.Errorf("back screen CC blend = (%d,%d,%d), want ~(116,131,0)", r, g, b)
 	}
 }
 
 func TestBackScreenAsSecondImageCCRTMD(t *testing.T) {
 	v := setupNBG0WithBackScreen(t)
+	swr := newSoftwareRenderer(v)
 
 	// CCRTMD=1 (ratio from second image = back screen)
 	v.regs[vdp2CCCTL] = 0x0201 // N0CCEN=1, CCRTMD=1
 	// BKCCRT = 8 (bits 12:8 of CCRLB)
 	v.regs[vdp2CCRLB] = 0x0800
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// PDF ratio 8: R = 255*23/32 = 183, G = 255*9/32 = 71.
+	// PDF ratio 8: R = 248*23/32 = 178, G = 248*9/32 = 69.
 	r, g := fb[0], fb[1]
-	if r < 182 || r > 184 || g < 70 || g > 72 {
-		t.Errorf("back screen CCRTMD=1 = (%d,%d), want ~(183,71)", r, g)
+	if r < 177 || r > 179 || g < 68 || g > 70 {
+		t.Errorf("back screen CCRTMD=1 = (%d,%d), want ~(178,69)", r, g)
 	}
 }
 
 func TestBackScreenCCDisabledNoBlend(t *testing.T) {
 	v := setupNBG0WithBackScreen(t)
+	swr := newSoftwareRenderer(v)
 
 	// CC disabled
 	v.regs[vdp2CCCTL] = 0x0000
 	v.regs[vdp2CCRNA] = 16
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
 	// No blending: pure red
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
-		t.Errorf("CC disabled = (%d,%d,%d), want (255,0,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 {
+		t.Errorf("CC disabled = (%d,%d,%d), want (248,0,0)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestBackScreenCCAddAsIs(t *testing.T) {
 	v := setupNBG0WithBackScreen(t)
+	swr := newSoftwareRenderer(v)
 
 	// CCMD=1 (add as-is)
 	v.regs[vdp2CCCTL] = 0x0101 // N0CCEN=1, CCMD=1
 
-	renderTestFrame(v)
-	fb := v.Framebuffer()
+	renderTestFrame(v, swr)
+	fb := swr.framebuffer()
 
-	// red (255,0,0) + green (0,255,0) = (255,255,0), clamped
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("CC add-as-is = (%d,%d,%d), want (255,255,0)", fb[0], fb[1], fb[2])
+	// red (248,0,0) + green (0,248,0) = (248,248,0)
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("CC add-as-is = (%d,%d,%d), want (248,248,0)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestShadowOnBackScreen(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// No layers enabled
 	v.regs[vdp2BGON] = 0x0000
@@ -6499,17 +6708,18 @@ func TestShadowOnBackScreen(t *testing.T) {
 	// SDCTL bit 5 = BKSDEN (enable shadow on back screen)
 	v.regs[vdp2SDCTL] = 0x0020
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 
-	// White (255,255,255) halved = (127,127,127)
-	if fb[0] != 127 || fb[1] != 127 || fb[2] != 127 {
-		t.Errorf("shadow on back screen = (%d,%d,%d), want (127,127,127)", fb[0], fb[1], fb[2])
+	// White (248,248,248) halved = (124,124,124)
+	if fb[0] != 124 || fb[1] != 124 || fb[2] != 124 {
+		t.Errorf("shadow on back screen = (%d,%d,%d), want (124,124,124)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestShadowOnBackScreenDisabled(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BGON] = 0x0000
 	writeVRAM16(v, 0, 0xFFFF)
 
@@ -6522,17 +6732,18 @@ func TestShadowOnBackScreenDisabled(t *testing.T) {
 	// SDCTL = 0: BKSDEN disabled
 	v.regs[vdp2SDCTL] = 0x0000
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 
 	// No shadow: white stays white
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 255 {
-		t.Errorf("shadow disabled = (%d,%d,%d), want (255,255,255)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 248 {
+		t.Errorf("shadow disabled = (%d,%d,%d), want (248,248,248)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestMSBTranspShadowOnBackScreen(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BGON] = 0x0000
 	writeVRAM16(v, 0, 0xFFFF)
 
@@ -6545,16 +6756,17 @@ func TestMSBTranspShadowOnBackScreen(t *testing.T) {
 	// SDCTL: BKSDEN=1 (bit 5), TPSDSL=1 (bit 8)
 	v.regs[vdp2SDCTL] = 0x0120
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 
-	if fb[0] != 127 || fb[1] != 127 || fb[2] != 127 {
-		t.Errorf("MSB transp shadow on back = (%d,%d,%d), want (127,127,127)", fb[0], fb[1], fb[2])
+	if fb[0] != 124 || fb[1] != 124 || fb[2] != 124 {
+		t.Errorf("MSB transp shadow on back = (%d,%d,%d), want (124,124,124)", fb[0], fb[1], fb[2])
 	}
 }
 
 func TestMSBSpriteShadowDoesNotAffectBackScreen(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BGON] = 0x0000
 	writeVRAM16(v, 0, 0xFFFF)
 
@@ -6566,12 +6778,12 @@ func TestMSBSpriteShadowDoesNotAffectBackScreen(t *testing.T) {
 
 	v.regs[vdp2SDCTL] = 0x0020 // BKSDEN=1
 
-	renderTestFrameFB(v, fbView)
-	fb := v.Framebuffer()
+	renderTestFrameFB(v, swr, fbView)
+	fb := swr.framebuffer()
 
 	// MSB sprite shadow only affects sprites, not back screen
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 255 {
-		t.Errorf("MSB sprite shadow on back = (%d,%d,%d), want (255,255,255)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 248 {
+		t.Errorf("MSB sprite shadow on back = (%d,%d,%d), want (248,248,248)", fb[0], fb[1], fb[2])
 	}
 }
 
@@ -6582,6 +6794,7 @@ func TestMSBSpriteShadowDoesNotAffectBackScreen(t *testing.T) {
 // 16.77M colors. Hi-res alone does NOT disable NBG2/NBG3.
 func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG2 and NBG3; NBG0/NBG1 default to 16-color (CHCTLA=0)
 	v.regs[vdp2BGON] = 0x000C   // bits 2,3 = NBG2, NBG3
@@ -6613,12 +6826,12 @@ func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 	v.cram[11] = 0xE0 // color 5 = green
 
 	// Normal mode: NBG2 and NBG3 should render
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	if v.layerBufs[2][0] == 0 {
+	if renderedLayerDot(v, swr, 2, 0, 0) == 0 {
 		t.Error("normal mode: NBG2 should render a pixel")
 	}
-	if v.layerBufs[3][0] == 0 {
+	if renderedLayerDot(v, swr, 3, 0, 0) == 0 {
 		t.Error("normal mode: NBG3 should render a pixel")
 	}
 
@@ -6626,12 +6839,12 @@ func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 	// (hi-res alone does not disable them).
 	v.regs[vdp2TVMD] = 0x8002
 	v.recalcTiming()
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	if v.layerBufs[2][0] == 0 {
+	if renderedLayerDot(v, swr, 2, 0, 0) == 0 {
 		t.Error("hi-res 16-color: NBG2 should still render")
 	}
-	if v.layerBufs[3][0] == 0 {
+	if renderedLayerDot(v, swr, 3, 0, 0) == 0 {
 		t.Error("hi-res 16-color: NBG3 should still render")
 	}
 
@@ -6639,7 +6852,7 @@ func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 	// Disabled layers keep stale buffer contents (the composite skips
 	// them), so the enable flag is the disable check.
 	v.regs[vdp2CHCTLA] = 0x0030
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if v.frame.nbgOn[2] {
 		t.Error("NBG0 32K-color: NBG2 should be disabled")
 	}
@@ -6649,7 +6862,7 @@ func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 
 	// NBG1 = 2048 colors (CHCTLA bits 13:12 = 10) disables NBG3.
 	v.regs[vdp2CHCTLA] = 0x2000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if !v.frame.nbgOn[2] {
 		t.Error("NBG1 2048-color: NBG2 should still render")
 	}
@@ -6662,6 +6875,7 @@ func TestNBG2NBG3ColorCountDisable(t *testing.T) {
 // can no longer be displayed.
 func TestNBG1ColorCountDisable(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG1; NBG0 defaults to 16-color (CHCTLA=0)
 	v.regs[vdp2BGON] = 0x0002 // bit 1 = NBG1
@@ -6680,8 +6894,8 @@ func TestNBG1ColorCountDisable(t *testing.T) {
 	v.cram[7] = 0x1F // color 3 = red (palette 0)
 
 	// NBG0 at 16-color: NBG1 renders
-	renderTestFrame(v)
-	if v.layerBufs[1][0] == 0 {
+	renderTestFrame(v, swr)
+	if renderedLayerDot(v, swr, 1, 0, 0) == 0 {
 		t.Error("NBG0 16-color: NBG1 should render a pixel")
 	}
 	if !v.frame.nbgOn[1] {
@@ -6690,14 +6904,14 @@ func TestNBG1ColorCountDisable(t *testing.T) {
 
 	// NBG0 at 32,768 colors: NBG1 still displays
 	v.regs[vdp2CHCTLA] = 0x0030
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if !v.frame.nbgOn[1] {
 		t.Error("NBG0 32K-color: NBG1 should still render")
 	}
 
 	// NBG0 at 16.77M colors (CHCTLA bits 6:4 = 100): NBG1 disabled
 	v.regs[vdp2CHCTLA] = 0x0040
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if v.frame.nbgOn[1] {
 		t.Error("NBG0 16.77M-color: NBG1 should be disabled")
 	}
@@ -6714,6 +6928,7 @@ func TestNBG1ColorCountDisable(t *testing.T) {
 func TestBurningRangersTitleColorCalc(t *testing.T) {
 	// NBG0 (bar) priority 2, NBG1 (text) priority 4, both 256-color.
 	v := setupTwoNBGLayers(t, 2, 4)
+	swr := newSoftwareRenderer(v)
 
 	// NBG0 = blue (so a wrong second image would be visibly different).
 	v.cram[10*2] = 0x7C
@@ -6736,7 +6951,7 @@ func TestBurningRangersTitleColorCalc(t *testing.T) {
 		v.vram[0x200+i] = 0x55 // 4bpp dots = 5
 	}
 	v.cram[5*2] = 0x03
-	v.cram[5*2+1] = 0xE0 // CRAM index 5 = green (0,255,0)
+	v.cram[5*2+1] = 0xE0 // CRAM index 5 = green (0,248,0)
 
 	// N1CCEN + CCMD add-as-is (matches the game's CCCTL=0x0103; N0CCEN
 	// is irrelevant since NBG1 is the top image).
@@ -6745,17 +6960,17 @@ func TestBurningRangersTitleColorCalc(t *testing.T) {
 	// Hi-res 640 mode: the condition under which the bug occurred.
 	v.regs[vdp2TVMD] = 0x8002
 	v.recalcTiming()
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	if v.layerBufs[2][0] == 0 {
+	if renderedLayerDot(v, swr, 2, 0, 0) == 0 {
 		t.Fatal("hi-res: NBG2 should render (it is the color-calc second image)")
 	}
 
-	fb := v.Framebuffer()
-	// Top NBG1 red (255,0,0) add-as-is second NBG2 green (0,255,0) =
-	// (255,255,0). The pre-fix bug blended NBG0 blue -> (255,0,255).
-	if fb[0] != 255 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("BR title pixel = (%d,%d,%d), want (255,255,0) "+
+	fb := swr.framebuffer()
+	// Top NBG1 red (248,0,0) add-as-is second NBG2 green (0,248,0) =
+	// (248,248,0). The pre-fix bug blended NBG0 blue -> (248,0,248).
+	if fb[0] != 248 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("BR title pixel = (%d,%d,%d), want (248,248,0) "+
 			"(NBG1 text + NBG2 second image)", fb[0], fb[1], fb[2])
 	}
 }
@@ -6764,6 +6979,7 @@ func TestBurningRangersTitleColorCalc(t *testing.T) {
 
 func TestBitmapSFPRMDMode1(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0, bitmap mode, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -6784,9 +7000,9 @@ func TestBitmapSFPRMDMode1(t *testing.T) {
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	pri := uint8(px >> 24)
 	// Priority = 4 (100) with LSB set to 1 -> 5 (101)
 	if pri != 5 {
@@ -6795,9 +7011,9 @@ func TestBitmapSFPRMDMode1(t *testing.T) {
 
 	// Clear N0BMPR (bit 5)
 	v.regs[vdp2BMPNA] = 0x0000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	pri = uint8(px >> 24)
 	// Priority = 4 (100) with LSB cleared -> 4 (100)
 	if pri != 4 {
@@ -6807,6 +7023,7 @@ func TestBitmapSFPRMDMode1(t *testing.T) {
 
 func TestBitmapSFPRMDMode2(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0, bitmap mode, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -6831,17 +7048,17 @@ func TestBitmapSFPRMDMode2(t *testing.T) {
 	v.cram[6] = 0x03
 	v.cram[7] = 0xE0 // color 3 = green
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Pixel (0,0): special priority bit set and dot=5 matches sfcode -> LSB=1 -> 5
-	px0 := v.layerBufs[0][0]
+	px0 := renderedLayerDot(v, swr, 0, 0, 0)
 	pri0 := uint8(px0 >> 24)
 	if pri0 != 5 {
 		t.Errorf("bitmap SFPRMD mode 2 match: priority = %d, want 5", pri0)
 	}
 
 	// Pixel (1,0): dot=3 no match -> priority LSB=0 -> 4
-	px1 := v.layerBufs[0][1]
+	px1 := renderedLayerDot(v, swr, 0, 1, 0)
 	pri1 := uint8(px1 >> 24)
 	if pri1 != 4 {
 		t.Errorf("bitmap SFPRMD mode 2 no match: priority = %d, want 4", pri1)
@@ -6850,14 +7067,15 @@ func TestBitmapSFPRMDMode2(t *testing.T) {
 	// Clearing the bitmap special priority bit suppresses the LSB even on a
 	// matching dot (manual Table 11.2 requires both conditions).
 	v.regs[vdp2BMPNA] = 0x0000
-	renderTestFrame(v)
-	if pri := uint8(v.layerBufs[0][0] >> 24); pri != 4 {
+	renderTestFrame(v, swr)
+	if pri := uint8(renderedLayerDot(v, swr, 0, 0, 0) >> 24); pri != 4 {
 		t.Errorf("bitmap SFPRMD mode 2 match but special priority bit clear: priority = %d, want 4", pri)
 	}
 }
 
 func TestBitmapSFCCMDMode1(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0, bitmap mode, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -6879,18 +7097,18 @@ func TestBitmapSFCCMDMode1(t *testing.T) {
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit == 0 {
 		t.Error("bitmap SFCCMD mode 1 bmpSpecialCC=1: layerCCBit not set")
 	}
 
 	// Clear N0BMCC
 	v.regs[vdp2BMPNA] = 0x0000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit != 0 {
 		t.Error("bitmap SFCCMD mode 1 bmpSpecialCC=0: layerCCBit should not be set")
 	}
@@ -6899,14 +7117,15 @@ func TestBitmapSFCCMDMode1(t *testing.T) {
 	// must not calculate (manual Table 12.3 requires the enable bit).
 	v.regs[vdp2BMPNA] = 0x0010
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("bitmap SFCCMD mode 1 N0CCEN=0: layerCCBit should not be set")
 	}
 }
 
 func TestBitmapSFCCMDMode3(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0, bitmap mode, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -6926,9 +7145,9 @@ func TestBitmapSFCCMDMode3(t *testing.T) {
 	v.cram[10] = 0x80 // bit 15 set
 	v.cram[11] = 0x1F // red
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit == 0 {
 		t.Error("bitmap SFCCMD mode 3 CRAM MSB=1: layerCCBit not set")
 	}
@@ -6937,9 +7156,9 @@ func TestBitmapSFCCMDMode3(t *testing.T) {
 	// invalidates.
 	v.WriteCRAM(10, 0x00)
 	v.WriteCRAM(11, 0x1F)
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit != 0 {
 		t.Error("bitmap SFCCMD mode 3 CRAM MSB=0: layerCCBit should not be set")
 	}
@@ -6947,6 +7166,7 @@ func TestBitmapSFCCMDMode3(t *testing.T) {
 
 func TestBitmapSFCCMDMode2RGBInvalid(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// NBG0, bitmap mode, 16.7M (32bpp RGB direct): CHCTLA bitmap bit + colorMode 4.
 	v.regs[vdp2BGON] = 0x0001
@@ -6968,10 +7188,10 @@ func TestBitmapSFCCMDMode2RGBInvalid(t *testing.T) {
 	v.vram[2] = 0x00
 	v.vram[3] = 0xFF
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Mode 2 is invalid for RGB formats (manual Table 12.3), so CC must stay off.
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit != 0 {
 		t.Error("32bpp SFCCMD mode 2: layerCCBit set, but mode 2 is invalid for RGB format")
 	}
@@ -6979,6 +7199,7 @@ func TestBitmapSFCCMDMode2RGBInvalid(t *testing.T) {
 
 func TestBitmapSFCCMDMode3RGB32bpp(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// NBG0, bitmap mode, 16.7M (32bpp RGB direct).
 	v.regs[vdp2BGON] = 0x0001
@@ -6997,25 +7218,26 @@ func TestBitmapSFCCMDMode3RGB32bpp(t *testing.T) {
 	v.vram[2] = 0x00
 	v.vram[3] = 0xFF
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Mode 3 RGB format takes the RGB path (manual Table 12.3), same as the
 	// 16bpp RGB case - 32bpp must not fall into the palette CRAM-MSB branch.
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit == 0 {
 		t.Error("32bpp SFCCMD mode 3: layerCCBit not set, but RGB format mode 3 enables CC")
 	}
 
 	// With the screen enable cleared, even RGB mode 3 must not calculate.
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("32bpp SFCCMD mode 3 N0CCEN=0: layerCCBit should not be set")
 	}
 }
 
 func TestBitmapSFPRMDPriorityZeroTransparent(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0, bitmap mode, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -7035,9 +7257,9 @@ func TestBitmapSFPRMDPriorityZeroTransparent(t *testing.T) {
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	// Priority 1 with LSB cleared = 0 -> pixel should be transparent
 	if px != 0 {
 		t.Errorf("bitmap SFPRMD priority=0 should be transparent, got 0x%08X", px)
@@ -7049,54 +7271,55 @@ func TestBitmapSFPRMDPriorityZeroTransparent(t *testing.T) {
 func TestLineTableY(t *testing.T) {
 	v := newTestVDP2()
 
-	// lineTableY reads the BeginFrame latch, so each interlace/field
+	// windowParams reads the BeginFrame latch, so each interlace/field
 	// change must be followed by a BeginFrame to take effect.
 
 	// Non-interlace: y passed through
 	v.interlace = 0
 	v.BeginFrame()
-	if got := v.lineTableY(5); got != 5 {
-		t.Errorf("non-interlace lineTableY(5) = %d, want 5", got)
+	if got := screen.LineTableY(v.windowParams(), 5); got != 5 {
+		t.Errorf("non-interlace LineTableY(5) = %d, want 5", got)
 	}
 
 	// Single-density: y/2
 	v.interlace = 2
 	v.BeginFrame()
-	if got := v.lineTableY(0); got != 0 {
-		t.Errorf("single-density lineTableY(0) = %d, want 0", got)
+	if got := screen.LineTableY(v.windowParams(), 0); got != 0 {
+		t.Errorf("single-density LineTableY(0) = %d, want 0", got)
 	}
-	if got := v.lineTableY(1); got != 0 {
-		t.Errorf("single-density lineTableY(1) = %d, want 0", got)
+	if got := screen.LineTableY(v.windowParams(), 1); got != 0 {
+		t.Errorf("single-density LineTableY(1) = %d, want 0", got)
 	}
-	if got := v.lineTableY(2); got != 1 {
-		t.Errorf("single-density lineTableY(2) = %d, want 1", got)
+	if got := screen.LineTableY(v.windowParams(), 2); got != 1 {
+		t.Errorf("single-density LineTableY(2) = %d, want 1", got)
 	}
-	if got := v.lineTableY(3); got != 1 {
-		t.Errorf("single-density lineTableY(3) = %d, want 1", got)
+	if got := screen.LineTableY(v.windowParams(), 3); got != 1 {
+		t.Errorf("single-density LineTableY(3) = %d, want 1", got)
 	}
 
 	// Double-density: displayed-line index = 2*y + fieldBit
 	v.interlace = 3
 	v.oddField = false
 	v.BeginFrame()
-	if got := v.lineTableY(5); got != 10 {
-		t.Errorf("double-density even-field lineTableY(5) = %d, want 10", got)
+	if got := screen.LineTableY(v.windowParams(), 5); got != 10 {
+		t.Errorf("double-density even-field LineTableY(5) = %d, want 10", got)
 	}
-	if got := v.lineTableY(0); got != 0 {
-		t.Errorf("double-density even-field lineTableY(0) = %d, want 0", got)
+	if got := screen.LineTableY(v.windowParams(), 0); got != 0 {
+		t.Errorf("double-density even-field LineTableY(0) = %d, want 0", got)
 	}
 	v.oddField = true
 	v.BeginFrame()
-	if got := v.lineTableY(5); got != 11 {
-		t.Errorf("double-density odd-field lineTableY(5) = %d, want 11", got)
+	if got := screen.LineTableY(v.windowParams(), 5); got != 11 {
+		t.Errorf("double-density odd-field LineTableY(5) = %d, want 11", got)
 	}
-	if got := v.lineTableY(0); got != 1 {
-		t.Errorf("double-density odd-field lineTableY(0) = %d, want 1", got)
+	if got := screen.LineTableY(v.windowParams(), 0); got != 1 {
+		t.Errorf("double-density odd-field LineTableY(0) = %d, want 1", got)
 	}
 }
 
 func TestSingleDensityInterlaceBackScreenPerLine(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Set single-density interlace: LSMD=2 (bits 7:6 = 10)
 	v.regs[vdp2TVMD] = 0x8080 // DISP=1, LSMD=2
@@ -7113,37 +7336,38 @@ func TestSingleDensityInterlaceBackScreenPerLine(t *testing.T) {
 	v.vram[2] = 0x83
 	v.vram[3] = 0xE0
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Line 0: should be red
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
-		t.Errorf("line 0 = (%d,%d,%d), want (255,0,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 {
+		t.Errorf("line 0 = (%d,%d,%d), want (248,0,0)", fb[0], fb[1], fb[2])
 	}
 
 	// Line 1: should also be red (same entry as line 0)
 	off1 := width * 4
-	if fb[off1] != 255 || fb[off1+1] != 0 || fb[off1+2] != 0 {
-		t.Errorf("line 1 = (%d,%d,%d), want (255,0,0)", fb[off1], fb[off1+1], fb[off1+2])
+	if fb[off1] != 248 || fb[off1+1] != 0 || fb[off1+2] != 0 {
+		t.Errorf("line 1 = (%d,%d,%d), want (248,0,0)", fb[off1], fb[off1+1], fb[off1+2])
 	}
 
 	// Line 2: should be green
 	off2 := width * 4 * 2
-	if fb[off2] != 0 || fb[off2+1] != 255 || fb[off2+2] != 0 {
-		t.Errorf("line 2 = (%d,%d,%d), want (0,255,0)", fb[off2], fb[off2+1], fb[off2+2])
+	if fb[off2] != 0 || fb[off2+1] != 248 || fb[off2+2] != 0 {
+		t.Errorf("line 2 = (%d,%d,%d), want (0,248,0)", fb[off2], fb[off2+1], fb[off2+2])
 	}
 
 	// Line 3: should also be green (same entry as line 2)
 	off3 := width * 4 * 3
-	if fb[off3] != 0 || fb[off3+1] != 255 || fb[off3+2] != 0 {
-		t.Errorf("line 3 = (%d,%d,%d), want (0,255,0)", fb[off3], fb[off3+1], fb[off3+2])
+	if fb[off3] != 0 || fb[off3+1] != 248 || fb[off3+2] != 0 {
+		t.Errorf("line 3 = (%d,%d,%d), want (0,248,0)", fb[off3], fb[off3+1], fb[off3+2])
 	}
 }
 
 func TestNonInterlaceBackScreenPerLineRegression(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Non-interlace (default from newTestVDP2)
 	v.regs[vdp2BKTAU] = 0x8000 // BKCLMD=1
@@ -7156,20 +7380,20 @@ func TestNonInterlaceBackScreenPerLineRegression(t *testing.T) {
 	v.vram[2] = 0x83
 	v.vram[3] = 0xE0
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Line 0: red
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
-		t.Errorf("line 0 = (%d,%d,%d), want (255,0,0)", fb[0], fb[1], fb[2])
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 {
+		t.Errorf("line 0 = (%d,%d,%d), want (248,0,0)", fb[0], fb[1], fb[2])
 	}
 
 	// Line 1: green (different from line 0, one entry per line)
 	off1 := width * 4
-	if fb[off1] != 0 || fb[off1+1] != 255 || fb[off1+2] != 0 {
-		t.Errorf("line 1 = (%d,%d,%d), want (0,255,0)", fb[off1], fb[off1+1], fb[off1+2])
+	if fb[off1] != 0 || fb[off1+1] != 248 || fb[off1+2] != 0 {
+		t.Errorf("line 1 = (%d,%d,%d), want (0,248,0)", fb[off1], fb[off1+1], fb[off1+2])
 	}
 }
 
@@ -7177,6 +7401,7 @@ func TestNonInterlaceBackScreenPerLineRegression(t *testing.T) {
 
 func TestNBG1WordSpecialPriBit(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 with 1-word PND, 256-color, 1x1
 	v.regs[vdp2BGON] = 0x0001
@@ -7206,9 +7431,9 @@ func TestNBG1WordSpecialPriBit(t *testing.T) {
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	pri := uint8(px >> 24)
 	// Priority = 4 (100) with LSB set to 1 from NxSPR -> 5 (101)
 	if pri != 5 {
@@ -7217,9 +7442,9 @@ func TestNBG1WordSpecialPriBit(t *testing.T) {
 
 	// Clear NxSPR (bit 9)
 	v.regs[vdp2PNCN0] = 0x8000 // 1-word, NxSPR=0
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	pri = uint8(px >> 24)
 	// Priority = 4 (100) with LSB cleared -> 4 (100)
 	if pri != 4 {
@@ -7229,6 +7454,7 @@ func TestNBG1WordSpecialPriBit(t *testing.T) {
 
 func TestNBG1WordSpecialCCBit(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 
 	// Enable NBG0 with 1-word PND, 256-color
 	v.regs[vdp2BGON] = 0x0001
@@ -7255,18 +7481,18 @@ func TestNBG1WordSpecialCCBit(t *testing.T) {
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px := v.layerBufs[0][0]
+	px := renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit == 0 {
 		t.Error("1-word NxSCC=1: layerCCBit not set")
 	}
 
 	// Clear NxSCC
 	v.regs[vdp2PNCN0] = 0x8000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
-	px = v.layerBufs[0][0]
+	px = renderedLayerDot(v, swr, 0, 0, 0)
 	if px&layerCCBit != 0 {
 		t.Error("1-word NxSCC=0: layerCCBit should not be set")
 	}
@@ -7275,8 +7501,8 @@ func TestNBG1WordSpecialCCBit(t *testing.T) {
 	// calculate (manual Table 12.3 requires the enable bit).
 	v.regs[vdp2PNCN0] = 0x8100
 	v.regs[vdp2CCCTL] = 0x0000
-	renderTestFrame(v)
-	if px := v.layerBufs[0][0]; px&layerCCBit != 0 {
+	renderTestFrame(v, swr)
+	if px := renderedLayerDot(v, swr, 0, 0, 0); px&layerCCBit != 0 {
 		t.Error("1-word NxSCC=1 N0CCEN=0: layerCCBit should not be set")
 	}
 }
@@ -7378,6 +7604,7 @@ func rowIsSentinel(fb []byte, row, width int, val byte) bool {
 
 func TestRenderLSMD3EvenFieldWritesEvenRowsOnly(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x80C0 // DISP=1, LSMD=3, VRESO=0, HRESO=0 -> 320x224 per field
 	v.recalcTiming()
 
@@ -7387,15 +7614,16 @@ func TestRenderLSMD3EvenFieldWritesEvenRowsOnly(t *testing.T) {
 
 	v.oddField = false // field 0 -> fieldBit 0 -> should write even rows
 
-	fb := v.Framebuffer()
 	// Latch the LSMD=3 geometry once: entering the mode blanks the
 	// framebuffer and line-doubles the first frame, so the per-field
 	// write discipline asserted below starts from the second frame.
 	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 
 	fillSentinel(fb, 0xAA)
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	width := int(v.activeWidth)
 	activeLines := int(v.activeLines)
@@ -7413,6 +7641,7 @@ func TestRenderLSMD3EvenFieldWritesEvenRowsOnly(t *testing.T) {
 
 func TestRenderLSMD3OddFieldWritesOddRowsOnly(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x80C0
 	v.recalcTiming()
 
@@ -7421,15 +7650,16 @@ func TestRenderLSMD3OddFieldWritesOddRowsOnly(t *testing.T) {
 
 	v.oddField = true // field 1 -> fieldBit 1 -> should write odd rows
 
-	fb := v.Framebuffer()
 	// Latch the LSMD=3 geometry once: entering the mode blanks the
 	// framebuffer and line-doubles the first frame, so the per-field
 	// write discipline asserted below starts from the second frame.
 	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 
 	fillSentinel(fb, 0xAA)
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	width := int(v.activeWidth)
 	activeLines := int(v.activeLines)
@@ -7447,19 +7677,23 @@ func TestRenderLSMD3OddFieldWritesOddRowsOnly(t *testing.T) {
 
 func TestRenderLSMD3TwoFieldsCoverAllRows(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x80C0
 	v.recalcTiming()
 
 	v.vram[0] = 0x00
 	v.vram[1] = 0x1F
 
-	fb := v.Framebuffer()
+	// The frame start sizes the frame buffer for the LSMD=3 geometry.
+	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 	fillSentinel(fb, 0xAA)
 
 	v.oddField = false
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	v.oddField = true
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	width := int(v.activeWidth)
 	doubled := int(v.activeLines) * 2
@@ -7472,6 +7706,7 @@ func TestRenderLSMD3TwoFieldsCoverAllRows(t *testing.T) {
 
 func TestRenderLSMD3BackScreenPerLineDisplayedLineAddressing(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x80C0
 	v.recalcTiming()
 
@@ -7492,44 +7727,51 @@ func TestRenderLSMD3BackScreenPerLineDisplayedLineAddressing(t *testing.T) {
 	v.vram[6] = 0xFF
 	v.vram[7] = 0xFF
 
-	fb := v.Framebuffer()
+	// The frame start sizes the frame buffer for the LSMD=3 geometry.
+	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 	width := int(v.activeWidth)
 
 	// Even field: writes rows 0,2,4,... reading entries 0,2,4,...
 	fillSentinel(fb, 0xAA)
 	v.oddField = false
-	renderTestFrame(v)
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
+	renderTestFrame(v, swr)
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 {
 		t.Errorf("even-field row 0 = (%d,%d,%d), want red", fb[0], fb[1], fb[2])
 	}
 	off2 := 2 * width * 4
-	if fb[off2] != 0 || fb[off2+1] != 0 || fb[off2+2] != 255 {
+	if fb[off2] != 0 || fb[off2+1] != 0 || fb[off2+2] != 248 {
 		t.Errorf("even-field row 2 = (%d,%d,%d), want blue", fb[off2], fb[off2+1], fb[off2+2])
 	}
 
 	// Odd field: writes rows 1,3,5,... reading entries 1,3,5,...
 	fillSentinel(fb, 0xAA)
 	v.oddField = true
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	off1 := width * 4
-	if fb[off1] != 0 || fb[off1+1] != 255 || fb[off1+2] != 0 {
+	if fb[off1] != 0 || fb[off1+1] != 248 || fb[off1+2] != 0 {
 		t.Errorf("odd-field row 1 = (%d,%d,%d), want green", fb[off1], fb[off1+1], fb[off1+2])
 	}
 	off3 := 3 * width * 4
-	if fb[off3] != 255 || fb[off3+1] != 255 || fb[off3+2] != 255 {
+	if fb[off3] != 248 || fb[off3+1] != 248 || fb[off3+2] != 248 {
 		t.Errorf("odd-field row 3 = (%d,%d,%d), want white", fb[off3], fb[off3+1], fb[off3+2])
 	}
 }
 
 func TestRenderLSMD3DISP0ClearsBothFields(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x00C0 // DISP=0, LSMD=3
 	v.recalcTiming()
 
-	fb := v.Framebuffer()
+	// The frame start sizes the frame buffer for the LSMD=3 geometry.
+	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 	fillSentinel(fb, 0xAA)
 
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	width := int(v.activeWidth)
 	doubled := int(v.activeLines) * 2
@@ -7544,11 +7786,12 @@ func TestRenderLSMD3DISP0ClearsBothFields(t *testing.T) {
 
 func TestRecalcTimingDoesNotClearOnLSMD3Entry(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// Start non-interlace
 	v.regs[vdp2TVMD] = 0x8000
 	v.recalcTiming()
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	fillSentinel(fb, 0xAA)
 
 	// Enter LSMD=3
@@ -7583,12 +7826,9 @@ func TestReadVDP1PixelLSMD3NoHalving(t *testing.T) {
 
 	// Under per-field interleave the caller passes the field-line index.
 	// y=5 must read VDP1 row 5 (not row 2 from a y/2 halving).
-	px, valid := v.readVDP1Pixel(7, 5)
-	if !valid {
-		t.Fatalf("readVDP1Pixel(7,5) returned invalid")
-	}
+	px := testVDP1Pixel(v, 7, 5)
 	if px != 0x1234 {
-		t.Errorf("readVDP1Pixel(7,5) = 0x%04X, want 0x1234 (no halving)", px)
+		t.Errorf("sprite pixel (7,5) = 0x%04X, want 0x1234 (no halving)", px)
 	}
 }
 
@@ -7607,24 +7847,25 @@ func TestLineTableYLSMD3WithMosaicStaysDoubled(t *testing.T) {
 	v.oddField = false
 	v.BeginFrame()
 
-	if got := v.lineTableY(5); got != 10 {
-		t.Errorf("LSMD=3 + mosaic lineTableY(5) = %d, want 10 (doubled)", got)
+	if got := screen.LineTableY(v.windowParams(), 5); got != 10 {
+		t.Errorf("LSMD=3 + mosaic LineTableY(5) = %d, want 10 (doubled)", got)
 	}
-	if got := v.lineTableY(10); got != 20 {
-		t.Errorf("LSMD=3 + mosaic lineTableY(10) = %d, want 20 (doubled)", got)
+	if got := screen.LineTableY(v.windowParams(), 10); got != 20 {
+		t.Errorf("LSMD=3 + mosaic LineTableY(10) = %d, want 20 (doubled)", got)
 	}
 
 	// The odd field renders the same displayed lines: the downgrade
 	// pins the field term to 0, so both fields read the same entries.
 	v.oddField = true
 	v.BeginFrame()
-	if got := v.lineTableY(5); got != 10 {
-		t.Errorf("LSMD=3 + mosaic odd field lineTableY(5) = %d, want 10 (field term 0)", got)
+	if got := screen.LineTableY(v.windowParams(), 5); got != 10 {
+		t.Errorf("LSMD=3 + mosaic odd field LineTableY(5) = %d, want 10 (field term 0)", got)
 	}
 }
 
 func TestRenderLSMD3WithMosaicWritesAllRows(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x80C0
 	v.recalcTiming()
 	v.regs[vdp2MZCTL] = 0x0001 // N0MZE=1 triggers LSMD=3 -> single-density downgrade
@@ -7633,28 +7874,34 @@ func TestRenderLSMD3WithMosaicWritesAllRows(t *testing.T) {
 	v.vram[0] = 0x00
 	v.vram[1] = 0x1F
 
-	fb := v.Framebuffer()
 	// Latch the LSMD=3 geometry once: entering the mode blanks the
 	// framebuffer and line-doubles the first frame, so the per-field
 	// write discipline asserted below starts from the second frame.
 	v.BeginFrame()
+	swr.beginFrame()
+	fb := swr.framebuffer()
 
 	fillSentinel(fb, 0xAA)
 
 	v.oddField = false
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 
 	// Under the downgrade the renderer treats the frame as single-density:
 	// rows 0..activeLines-1 are all written; rows beyond activeLines stay
-	// sentinel because DisplayHeight falls back to non-doubled.
+	// sentinel because DisplayHeight falls back to non-doubled. The frame
+	// buffer holds the displayed rows rounded up to a power of two, so the
+	// rows past them are checked as far as it holds.
 	width := int(v.activeWidth)
 	activeLines := int(v.activeLines)
+	if h := v.DisplayHeight(); h != activeLines {
+		t.Fatalf("downgrade: display height %d, want %d (no doubling)", h, activeLines)
+	}
 	for row := 0; row < activeLines; row++ {
 		if rowIsSentinel(fb, row, width, 0xAA) {
 			t.Fatalf("downgrade: row %d should be written", row)
 		}
 	}
-	for row := activeLines; row < 2*activeLines; row++ {
+	for row := activeLines; row < 2*activeLines && (row+1)*width*4 <= len(fb); row++ {
 		if !rowIsSentinel(fb, row, width, 0xAA) {
 			t.Fatalf("downgrade: row %d should be untouched (no doubling)", row)
 		}
@@ -7698,14 +7945,14 @@ func TestNBGSamplingLSMD3MosaicDowngradeKeepsStepping(t *testing.T) {
 	}
 
 	ref := setup(0)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(ref, 0, buf)
 
 	mz := setup(0x0001) // N0MZE=1, 1x1 mosaic
 	if got := mz.effectiveInterlace(); got != 2 {
 		t.Fatalf("effectiveInterlace = %d, want 2 (downgrade active)", got)
 	}
-	bufMz := make([]uint32, 352*256)
+	bufMz := make([]uint32, testFrameDots)
 	renderTestNBG(mz, 0, bufMz)
 
 	width := int(ref.activeWidth)
@@ -7746,22 +7993,23 @@ func setupNBG0FullTile(t *testing.T) *VDP2 {
 	return v
 }
 
-// Register writes between RenderLine calls must not affect later lines:
+// Register writes between row renders must not affect later lines:
 // layer configuration is latched by BeginFrame.
 func TestPerLineRegisterWriteNotVisible(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
+	px0 := swr.in.Layers[0][0]
 	// Scrolling right by 8 would move the red tile away from x=0; the
 	// latched config must keep rendering the unscrolled position.
 	v.regs[vdp2SCXIN0] = 8
-	v.RenderLine(1, vdp1FBView{})
+	v.renderLineTest(swr, 1, vdp1FBView{})
+	px1 := swr.in.Layers[0][0]
 
-	width := v.frame.width
-	px0 := v.layerBufs[0][0]
-	px1 := v.layerBufs[0][width]
-	if px0 == 0 || uint8(px0>>16) != 255 {
+	if px0 == 0 || uint8(screen.ColorR(px0)) != 248 {
 		t.Fatalf("row 0 pixel = 0x%08X, want red", px0)
 	}
 	if px1 != px0 {
@@ -7769,50 +8017,51 @@ func TestPerLineRegisterWriteNotVisible(t *testing.T) {
 	}
 }
 
-// VRAM writes between RenderLine calls are visible to later lines:
+// VRAM writes between row renders are visible to later lines:
 // character data is read live as each line renders.
 func TestPerLineVRAMWriteVisible(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
+	if px := swr.in.Layers[0][0]; px == 0 || uint8(screen.ColorR(px)) != 248 {
+		t.Fatalf("row 0 pixel = 0x%08X, want red (rendered before the VRAM write)", px)
+	}
 	// Zero the cell's dot data; later lines sample VRAM live and
 	// render transparent.
 	for i := 0; i < 0x20; i++ {
 		v.vram[0x20+i] = 0x00
 	}
-	v.RenderLine(1, vdp1FBView{})
-
-	width := v.frame.width
-	if px := v.layerBufs[0][0]; px == 0 || uint8(px>>16) != 255 {
-		t.Fatalf("row 0 pixel = 0x%08X, want red (rendered before the VRAM write)", px)
-	}
-	if px := v.layerBufs[0][width]; px != 0 {
+	v.renderLineTest(swr, 1, vdp1FBView{})
+	if px := swr.in.Layers[0][0]; px != 0 {
 		t.Errorf("row 1 pixel = 0x%08X, want transparent (VRAM is read live per line)", px)
 	}
 }
 
-// CRAM writes between RenderLine calls must not affect later lines: the
+// CRAM writes between row renders must not affect later lines: the
 // CRAM color cache is built by BeginFrame.
 // CRAM writes between lines take effect on the following line: the
 // color cache is rebuilt at the next BeginLine.
 func TestPerLineCRAMWriteAppliesNextLine(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
+	px0 := swr.in.Layers[0][0]
 	// Rewrite palette 1 dot 3 to green; row 1 picks it up.
 	v.WriteCRAM(38, 0x03)
 	v.WriteCRAM(39, 0xE0)
-	v.RenderLine(1, vdp1FBView{})
+	v.renderLineTest(swr, 1, vdp1FBView{})
+	px1 := swr.in.Layers[0][0]
 
-	width := v.frame.width
-	px0 := v.layerBufs[0][0]
-	px1 := v.layerBufs[0][width]
-	if uint8(px0>>16) != 255 || uint8(px0>>8) != 0 {
+	if uint8(screen.ColorR(px0)) != 248 || uint8(screen.ColorG(px0)) != 0 {
 		t.Fatalf("row 0 pixel = 0x%08X, want red", px0)
 	}
-	if uint8(px1>>16) != 0 || uint8(px1>>8) != 255 {
+	if uint8(screen.ColorR(px1)) != 0 || uint8(screen.ColorG(px1)) != 248 {
 		t.Errorf("row 1 pixel = 0x%08X, want green (CRAM write applies from the next line)", px1)
 	}
 }
@@ -7821,73 +8070,80 @@ func TestPerLineCRAMWriteAppliesNextLine(t *testing.T) {
 // the remaining lines, and the inverse (set mid-frame) stays blank.
 func TestBeginFrameLatchesDISP(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	// Back screen green at VRAM address 0
 	v.vram[0] = 0x83
 	v.vram[1] = 0xE0
 
 	v.BeginFrame()
+	swr.beginFrame()
 	v.regs[vdp2TVMD] = 0x0000 // DISP=0 after the latch
-	v.RenderLine(0, vdp1FBView{})
-	fb := v.Framebuffer()
-	if fb[0] != 0 || fb[1] != 255 || fb[2] != 0 {
-		t.Errorf("pixel = (%d,%d,%d), want (0,255,0): DISP=1 latched at BeginFrame", fb[0], fb[1], fb[2])
+	v.renderLineTest(swr, 0, vdp1FBView{})
+	fb := swr.framebuffer()
+	if fb[0] != 0 || fb[1] != 248 || fb[2] != 0 {
+		t.Errorf("pixel = (%d,%d,%d), want (0,248,0): DISP=1 latched at BeginFrame", fb[0], fb[1], fb[2])
 	}
 
 	v.regs[vdp2TVMD] = 0x0000
-	v.BeginFrame()            // blanks the output with DISP=0 latched
+	v.BeginFrame()            // latches DISP=0
+	swr.beginFrame()          // blanks the output
 	v.regs[vdp2TVMD] = 0x8000 // DISP=1 after the latch
-	v.RenderLine(0, vdp1FBView{})
+	v.renderLineTest(swr, 0, vdp1FBView{})
 	if fb[0] != 0 || fb[1] != 0 || fb[2] != 0 {
 		t.Errorf("pixel = (%d,%d,%d), want (0,0,0): DISP=0 latched at BeginFrame", fb[0], fb[1], fb[2])
 	}
 }
 
-// RenderLine(y) produces the complete framebuffer row y (back screen
+// renderLineTest(y) produces the complete framebuffer row y (back screen
 // plus layer composite) with no end-of-frame step; other rows stay
 // untouched.
 func TestRenderLineCompositesRow(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 
 	// Back screen green via a table away from the tile data at VRAM 0.
 	v.regs[vdp2BKTAL] = 0x8000 // bkAddr = 0x10000
 	v.WriteVRAM16(0x10000, 0x83E0)
 
-	for i := range v.framebuffer {
-		v.framebuffer[i] = 0xAB
+	for i := range swr.outputFramebuffer {
+		swr.outputFramebuffer[i] = 0xABABABAB
 	}
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
-	if fb[0] != 255 || fb[1] != 0 || fb[2] != 0 {
+	if fb[0] != 248 || fb[1] != 0 || fb[2] != 0 {
 		t.Errorf("row 0 tile pixel = (%d,%d,%d), want red", fb[0], fb[1], fb[2])
 	}
 	off := 200 * 4 // x=200, beyond the 8-pixel tile
-	if fb[off] != 0 || fb[off+1] != 255 || fb[off+2] != 0 {
+	if fb[off] != 0 || fb[off+1] != 248 || fb[off+2] != 0 {
 		t.Errorf("row 0 back screen pixel = (%d,%d,%d), want green", fb[off], fb[off+1], fb[off+2])
 	}
 	if fb[stride] != 0xAB {
-		t.Error("row 1 should be untouched before RenderLine(1)")
+		t.Error("row 1 should be untouched before renderLineTest(1)")
 	}
 }
 
-// Framebuffer rows for lines never passed to RenderLine keep their
+// Frame rows for lines never rendered keep their
 // prior content; rendered rows are back-screen filled.
 func TestPartialFrameFramebufferRowsUntouched(t *testing.T) {
 	v := newTestVDP2()
-	for i := range v.framebuffer {
-		v.framebuffer[i] = 0xAB
+	swr := newSoftwareRenderer(v)
+	for i := range swr.outputFramebuffer {
+		swr.outputFramebuffer[i] = 0xABABABAB
 	}
 
 	v.BeginFrame()
+	swr.beginFrame()
 	half := v.frame.height / 2
 	for y := 0; y < half; y++ {
-		v.RenderLine(y, vdp1FBView{})
+		v.renderLineTest(swr, y, vdp1FBView{})
 	}
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
 	if fb[3] != 0xFF {
 		t.Error("row 0 should be back-screen filled (alpha 0xFF)")
@@ -7898,33 +8154,38 @@ func TestPartialFrameFramebufferRowsUntouched(t *testing.T) {
 	}
 }
 
-// The VDP1 display FB is sampled per line: swapping it between
-// RenderLine calls affects later lines only.
-func TestPerLineVDP1FBSampling(t *testing.T) {
+// The sprite layer samples the VDP1 buffer as it is at each row's
+// render point: a write to the buffer between two rows' renders is
+// seen by the later row.
+func TestSpriteLayerReadsBufferAtRender(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2SPCTL] = 0x0000 // sprite type 0
 	v.regs[vdp2PRISA] = 0x0005
-
-	// Sprite pixel 0x0005 (type 0: PR=0 -> PRISA, DC=5) at (0,0) and
-	// (0,1) of FB A; FB B is empty. CRAM entry 5 = red.
-	fbA := make([]byte, 512*256*2)
-	fbA[1] = 0x05
-	fbA[512*2+1] = 0x05
-	fbB := make([]byte, 512*256*2)
+	// CRAM entry 5 = red; sprite pixel 0x0005 (type 0: PR=0 -> PRISA,
+	// DC=5) is a red dot.
 	v.cram[10] = 0x00
 	v.cram[11] = 0x1F
-
-	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{data: fbA, is8bpp: false, width: 512, height: 256})
-	v.RenderLine(1, vdp1FBView{data: fbB, is8bpp: false, width: 512, height: 256})
-
-	fb := v.Framebuffer()
-	stride := v.FramebufferStride()
-	if fb[0] != 255 || fb[1] != 0 {
-		t.Errorf("row 0 sprite pixel = (%d,%d,%d), want red (FB A sampled)", fb[0], fb[1], fb[2])
+	live := make([]byte, 512*256*2)
+	rowPixel := func(y int) int { return y*512*2 + 1 }
+	isRed := func(y int) bool {
+		fb := swr.framebuffer()
+		off := y * v.FramebufferStride()
+		return fb[off] == 248 && fb[off+1] == 0 && fb[off+2] == 0
 	}
-	if fb[stride] != 0 || fb[stride+1] != 0 || fb[stride+2] != 0 {
-		t.Errorf("row 1 pixel = (%d,%d,%d), want black (FB B sampled)", fb[stride], fb[stride+1], fb[stride+2])
+
+	live[rowPixel(0)] = 0x05
+	view := vdp1FBView{data: live, width: 512, height: 256}
+	v.BeginFrame()
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, view)
+	live[rowPixel(1)] = 0x05
+	v.renderLineTest(swr, 1, view)
+	if !isRed(0) {
+		t.Error("row 0 does not see the buffer at its render")
+	}
+	if !isRed(1) {
+		t.Error("row 1 does not see the write made before its render")
 	}
 }
 
@@ -7933,6 +8194,7 @@ func TestPerLineVDP1FBSampling(t *testing.T) {
 // through Write so the dirty flag triggers the re-decode.
 func TestPerLineWindowWriteAppliesNextLine(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 	// Back screen black via a table away from the tile data at VRAM 0.
 	v.regs[vdp2BKTAL] = 0x8000
 
@@ -7945,18 +8207,19 @@ func TestPerLineWindowWriteAppliesNextLine(t *testing.T) {
 	v.regs[vdp2WCTLA] = 0x0002 // NBG0 W0 enable, inside mode
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
 	// Move the window start past (0,0): the tile becomes visible at
 	// x=0 from the next line.
 	v.Write(vdp2WPSX0*2, 20)
-	v.RenderLine(1, vdp1FBView{})
+	v.renderLineTest(swr, 1, vdp1FBView{})
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
 	if fb[0] != 0 || fb[1] != 0 || fb[2] != 0 {
 		t.Fatalf("row 0 pixel = (%d,%d,%d), want black (window-masked)", fb[0], fb[1], fb[2])
 	}
-	if fb[stride] != 255 || fb[stride+1] != 0 || fb[stride+2] != 0 {
+	if fb[stride] != 248 || fb[stride+1] != 0 || fb[stride+2] != 0 {
 		t.Errorf("row 1 pixel = (%d,%d,%d), want red (window write applies from the next line)",
 			fb[stride], fb[stride+1], fb[stride+2])
 	}
@@ -7966,15 +8229,17 @@ func TestPerLineWindowWriteAppliesNextLine(t *testing.T) {
 func TestPerLineCCRatioWriteAppliesNextLine(t *testing.T) {
 	// NBG0 (green, pri 5) blended half-and-half over NBG1 (red, pri 3).
 	v := setupTwoNBGLayers(t, 5, 3)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001 // N0CCEN
 	v.regs[vdp2CCRNA] = 16     // 50% blend
 
 	v.BeginFrame()
-	v.RenderLine(0, vdp1FBView{})
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, vdp1FBView{})
 	v.Write(vdp2CCRNA*2, 0) // changes the blend from the next line
-	v.RenderLine(1, vdp1FBView{})
+	v.renderLineTest(swr, 1, vdp1FBView{})
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
 	same := true
 	for i := 0; i < 3; i++ {
@@ -7992,6 +8257,7 @@ func TestPerLineCCRatioWriteAppliesNextLine(t *testing.T) {
 // following line.
 func TestPerLineSpritePriorityWriteAppliesNextLine(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2SPCTL] = 0x0000 // sprite type 0
 	v.regs[vdp2PRISA] = 0x0005
 
@@ -8003,44 +8269,43 @@ func TestPerLineSpritePriorityWriteAppliesNextLine(t *testing.T) {
 	v.cram[11] = 0x1F
 
 	v.BeginFrame()
+	swr.beginFrame()
 	fbView := vdp1FBView{data: fbv, is8bpp: false, width: 512, height: 256}
-	v.RenderLine(0, fbView)
+	v.renderLineTest(swr, 0, fbView)
 	v.Write(vdp2PRISA*2, 0x0000) // priority 0 hides the sprite from the next line
-	v.RenderLine(1, fbView)
+	v.renderLineTest(swr, 1, fbView)
 
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	stride := v.FramebufferStride()
-	if fb[0] != 255 {
-		t.Fatalf("row 0 sprite pixel R = %d, want 255", fb[0])
+	if fb[0] != 248 {
+		t.Fatalf("row 0 sprite pixel R = %d, want 248", fb[0])
 	}
 	if fb[stride] != 0 {
 		t.Errorf("row 1 sprite pixel R = %d, want 0 (PRISA write applies from the next line)", fb[stride])
 	}
 }
 
-// Rows not passed to RenderLine keep their prior layer buffer contents
-// for an enabled layer; BeginFrame must not clear enabled layers.
-func TestPartialFrameLeavesRowsUntouched(t *testing.T) {
+// The frame start does not clear an enabled layer's buffer: its row
+// slot keeps its contents until a row renders into it.
+func TestFrameStartLeavesLayerRowUntouched(t *testing.T) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
+	v.BeginFrame()
+	swr.beginFrame()
 
 	const sentinel = 0xDEADBEEF
-	for i := range v.layerBufs[0] {
-		v.layerBufs[0][i] = sentinel
+	for i := range swr.in.Layers[0] {
+		swr.in.Layers[0][i] = sentinel
 	}
 
 	v.BeginFrame()
-	half := v.frame.height / 2
-	for y := 0; y < half; y++ {
-		v.RenderLine(y, vdp1FBView{})
+	swr.beginFrame()
+	if px := swr.in.Layers[0][0]; px != sentinel {
+		t.Errorf("row slot pixel = 0x%08X after the frame start, want sentinel", px)
 	}
-
-	width := v.frame.width
-	if px := v.layerBufs[0][0]; px == sentinel {
-		t.Error("row 0 should be overwritten by RenderLine")
-	}
-	lastRow := v.frame.height - 1
-	if px := v.layerBufs[0][lastRow*width]; px != sentinel {
-		t.Errorf("row %d pixel = 0x%08X, want sentinel (not rendered)", lastRow, px)
+	v.renderLineTest(swr, 0, vdp1FBView{})
+	if px := swr.in.Layers[0][0]; px == sentinel {
+		t.Error("row 0 should be overwritten by the row render")
 	}
 }
 
@@ -8085,7 +8350,7 @@ func TestEXBGWindowOriginConversion(t *testing.T) {
 		v.regs[vdp2TVMD] = c.tvmd
 		v.recalcTiming()
 		v.regs[vdp2EXTEN] = 1
-		src := &fakeEXBGSource{rgb: make([]uint32, 352*240), w: 352, h: 240, dx: 23, dy: 49}
+		src := &fakeEXBGSource{rgb: make([]uint32, testFrameDots), w: 352, h: 240, dx: 23, dy: 49}
 		v.SetEXBGSource(src)
 		v.BeginFrame()
 		if !v.exbgSized {
@@ -8097,4 +8362,39 @@ func TestEXBGWindowOriginConversion(t *testing.T) {
 				c.name, v.exbgDX, v.exbgDY, c.wantDX, c.wantDY)
 		}
 	}
+}
+
+// rpWindowBTest resolves the rotation parameter window for row y and
+// reports whether it selects parameter B at x.
+func rpWindowBTest(v *VDP2, x, y int) bool {
+	w := v.rbgRPWindow(y)
+	return screen.RPWindowB(&w, int32(x))
+}
+
+// nbgSpanTest renders pixels [x0,x1) of the prepared row y of NBG
+// screen bg into buf through the span entry, as the row render does.
+func nbgSpanTest(v *VDP2, buf []uint32, bg, y int, x0, x1 int) {
+	pp := &v.rowRecord(y).NBG[bg]
+	vram := (*compute.VDP2VRAM)(v.vram)
+	out := compute.Layer(buf)
+	if pp.Screen.Bitmap {
+		screen.NBGBitmapSpan(vram, &v.palette, out, pp, int32(x0), int32(x1))
+		return
+	}
+	var cache screen.NBGCellState
+	screen.NBGCellSpan(vram, &v.palette, out, pp, &cache, int32(x0), int32(x1))
+}
+
+// rbgSpanTest renders pixels [x0,x1) of a prepared rotation screen row
+// into buf through the render span, as the row render does.
+func rbgSpanTest(v *VDP2, buf []uint32, lc []uint8, pp *screen.RBGParams, x0, x1 int) {
+	vram := (*compute.VDP2VRAM)(v.vram)
+	cram := (*compute.CRAM)(v.cram)
+	out := compute.Layer(buf)
+	lcb := compute.LineColor(lc)
+	if pp.Screen.Bitmap {
+		screen.RBGBitmapSpan(vram, cram, &v.palette, out, lcb, pp, int32(x0), int32(x1))
+		return
+	}
+	screen.RBGCellSpan(vram, cram, &v.palette, out, lcb, pp, int32(x0), int32(x1))
 }

@@ -62,7 +62,8 @@ func eraseTestVDP1() *VDP1 {
 // it targets: the 1-cycle change, the V-blank erase of a manual
 // change, the latched erase request after a manual change at V-blank
 // IN and at V-blank OUT, the late erase of manual mode, and the
-// double interlace erase of the DIL-matched buffer.
+// double interlace change, which swaps and erases the buffer it
+// brings in like the 1-cycle change under either DIL.
 func TestVDP1EraseSites(t *testing.T) {
 	t.Run("1-cycle change", func(t *testing.T) {
 		v := eraseTestVDP1()
@@ -119,14 +120,17 @@ func TestVDP1EraseSites(t *testing.T) {
 		checkErased(t, v, target, 0, 0, 319, 255)
 	})
 	t.Run("double interlace", func(t *testing.T) {
-		v := eraseTestVDP1()
-		v.Write(0x02, 0x0008)
-		v.VBlankIn()
-		checkErased(t, v, v.drawFB, 0, 0, 319, 255)
-		checkUntouched(t, "DIL even, display buffer", v.displayFB)
-		v.Write(0x02, 0x000C)
-		v.VBlankIn()
-		checkErased(t, v, v.displayFB, 0, 0, 319, 255)
+		for _, fbcr := range []uint16{0x0008, 0x000C} {
+			v := eraseTestVDP1()
+			v.Write(0x02, fbcr)
+			before := v.displayFB
+			v.VBlankIn()
+			if &v.drawFB[0] != &before[0] {
+				t.Errorf("FBCR %#x: the change did not swap before the erase", fbcr)
+			}
+			checkErased(t, v, v.drawFB, 0, 0, 319, 255)
+			checkUntouched(t, "double interlace, display buffer", v.displayFB)
+		}
 	})
 }
 

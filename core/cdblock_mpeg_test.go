@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/gen2brain/mpeg"
+
+	"github.com/user-none/erings/core/compute/screen"
 )
 
 // mpegInit issues $93 MpegInit, the gate for every other MPEG command.
@@ -398,7 +400,7 @@ func TestCDBlockMpegFrameLatch(t *testing.T) {
 		t.Fatalf("frame = %dx%d ok=%v, want 2x2 true", w, h, ok)
 	}
 	r, g, b := color.YCbCrToRGB(0x50, 0x90, 0x70)
-	want := uint32(r)<<16 | uint32(g)<<8 | uint32(b)
+	want := screen.PackColor(uint32(r), uint32(g), uint32(b))
 	for i, px := range rgb[:w*h] {
 		if px != want {
 			t.Fatalf("pixel %d = 0x%06X, want 0x%06X", i, px, want)

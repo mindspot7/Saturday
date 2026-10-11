@@ -136,25 +136,26 @@ func TestClipSegParam(t *testing.T) {
 		{"vertical right", 105, 10, 105, 40},
 	}
 	for _, tc := range rejects {
-		if _, _, ok := clipSegParam(tc.x0, tc.y0, tc.x1, tc.y1, cx, cy); ok {
+		if _, _, ok := clipSteps(tc.x0, tc.y0, tc.x1, tc.y1, cx, cy, 20); ok {
 			t.Errorf("%s: segment (%d,%d)-(%d,%d) should be rejected", tc.name, tc.x0, tc.y0, tc.x1, tc.y1)
 		}
 	}
-	t0, t1, ok := clipSegParam(-10, 5, 10, 5, cx, cy)
-	if !ok || t0 != 0.5 || t1 != 1 {
-		t.Errorf("crossing left edge: t0=%v t1=%v ok=%v, want 0.5 1 true", t0, t1, ok)
+	// Crossing segments over 20 steps: the entry and exit floors.
+	j0, j1, ok := clipSteps(-10, 5, 10, 5, cx, cy, 20)
+	if !ok || j0 != 10 || j1 != 20 {
+		t.Errorf("crossing left edge: j0=%v j1=%v ok=%v, want 10 20 true", j0, j1, ok)
 	}
-	t0, t1, ok = clipSegParam(90, 5, 110, 5, cx, cy)
-	if !ok || t0 != 0 || t1 != 0.5 {
-		t.Errorf("crossing right edge: t0=%v t1=%v ok=%v, want 0 0.5 true", t0, t1, ok)
+	j0, j1, ok = clipSteps(90, 5, 110, 5, cx, cy, 20)
+	if !ok || j0 != 0 || j1 != 10 {
+		t.Errorf("crossing right edge: j0=%v j1=%v ok=%v, want 0 10 true", j0, j1, ok)
 	}
-	t0, t1, ok = clipSegParam(50, -10, 50, 10, cx, cy)
-	if !ok || t0 != 0.5 || t1 != 1 {
-		t.Errorf("crossing top edge: t0=%v t1=%v ok=%v, want 0.5 1 true", t0, t1, ok)
+	j0, j1, ok = clipSteps(50, -10, 50, 10, cx, cy, 20)
+	if !ok || j0 != 10 || j1 != 20 {
+		t.Errorf("crossing top edge: j0=%v j1=%v ok=%v, want 10 20 true", j0, j1, ok)
 	}
-	t0, t1, ok = clipSegParam(50, 40, 50, 60, cx, cy)
-	if !ok || t0 != 0 || t1 != 0.5 {
-		t.Errorf("crossing bottom edge: t0=%v t1=%v ok=%v, want 0 0.5 true", t0, t1, ok)
+	j0, j1, ok = clipSteps(50, 40, 50, 60, cx, cy, 20)
+	if !ok || j0 != 0 || j1 != 10 {
+		t.Errorf("crossing bottom edge: j0=%v j1=%v ok=%v, want 0 10 true", j0, j1, ok)
 	}
 }
 

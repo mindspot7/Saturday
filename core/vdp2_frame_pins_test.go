@@ -22,13 +22,13 @@ func fnv1a32(h uint32, data []byte) uint32 {
 
 // vdp2BandHashes hashes the composited output in bands of goldenBandRows
 // rows (RGB bytes only).
-func vdp2BandHashes(v *VDP2) []uint32 {
+func vdp2BandHashes(v *VDP2, swr *softwareRenderer) []uint32 {
 	w := int(v.activeWidth)
 	h := int(v.frame.height)
 	if v.frame.lsmd3 {
 		h *= 2
 	}
-	fb := v.Framebuffer()
+	fb := swr.framebuffer()
 	var out []uint32
 	for y0 := 0; y0 < h; y0 += goldenBandRows {
 		hash := uint32(2166136261)
@@ -75,7 +75,7 @@ func checkBands(t *testing.T, name string, got, want []uint32, describeBand func
 
 // describeVDP2Band returns the first row of the band as run-length
 // encoded RGB triples.
-func describeVDP2Band(v *VDP2) func(band int) string {
+func describeVDP2Band(v *VDP2, swr *softwareRenderer) func(band int) string {
 	return func(band int) string {
 		w := int(v.activeWidth)
 		y := band * goldenBandRows
@@ -89,7 +89,7 @@ func describeVDP2Band(v *VDP2) func(band int) string {
 			}
 		}
 		for x := 0; x < w; x++ {
-			r, g, b := outRGB(v, x, y)
+			r, g, b := outRGB(v, swr, x, y)
 			if run > 0 && r == pr && g == pg && b == pb {
 				run++
 				continue
@@ -103,18 +103,20 @@ func describeVDP2Band(v *VDP2) func(band int) string {
 }
 
 // goldenSixLayers is the six-layer interaction scene at 320x224.
-func goldenSixLayers(t *testing.T) *VDP2 {
+func goldenSixLayers(t *testing.T) (*VDP2, *softwareRenderer) {
 	v, fb := setupSixLayerScene(t)
-	renderTestFrameFB(v, fb)
-	return v
+	swr := newSoftwareRenderer(v)
+	renderTestFrameFB(v, swr, fb)
+	return v, swr
 }
 
 // goldenRBG0WindowCoefficient is RBG0 with the rotation parameter window
 // (RPMD 3), parameter B on the inside of W0, a coefficient table with
 // line color enable on parameter A, line color insertion, and color
 // calculation.
-func goldenRBG0WindowCoefficient(t *testing.T) *VDP2 {
+func goldenRBG0WindowCoefficient(t *testing.T) (*VDP2, *softwareRenderer) {
 	v := setupRBG0ParamAB(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2RPMD] = 0x0003
 	v.regs[vdp2WPSX0], v.regs[vdp2WPEX0] = 0, 40
 	v.regs[vdp2WPSY0], v.regs[vdp2WPEY0] = 0, 100
@@ -140,34 +142,37 @@ func goldenRBG0WindowCoefficient(t *testing.T) *VDP2 {
 	v.regs[vdp2BKTAU] = 0x0002
 	v.regs[vdp2BKTAL] = 0xC000
 	writeVRAM16(v, 0x58000, 0x83E0)
-	renderTestFrame(v)
-	return v
+	renderTestFrame(v, swr)
+	return v, swr
 }
 
 // goldenRBG1OverRBG0 is RBG1 with a coefficient of 2.0 over RBG0 on the
 // same page.
-func goldenRBG1OverRBG0(t *testing.T) *VDP2 {
+func goldenRBG1OverRBG0(t *testing.T) (*VDP2, *softwareRenderer) {
 	v := setupRBG1Scene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2KTCTL] = 0x0100
 	writeRotParam32(v, 0x10080, 0x54, 0x6000, 0x0000)
 	writeRotParam32(v, 0x10080, 0x58, 0x0000, 0x0000)
 	writeVRAM16(v, 0x18000, 0x0002)
 	writeVRAM16(v, 0x18002, 0x0000)
 	writeRotParam32(v, 0x10080, 0x00, 8, 0x0000) // Xst_B = 8
-	renderTestFrame(v)
-	return v
+	renderTestFrame(v, swr)
+	return v, swr
 }
 
 // goldenHiResSpriteWindowCC is a 640-dot frame with NBG0 color
 // calculating against a blue back screen and masked by the sprite
-// window.
-func goldenHiResSpriteWindowCC(t *testing.T) *VDP2 {
+// window, enabled by SPWINEN on sprite type 2.
+func goldenHiResSpriteWindowCC(t *testing.T) (*VDP2, *softwareRenderer) {
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x8002
 	v.recalcTiming()
 	v.regs[vdp2BKTAU] = 0x0002
 	v.regs[vdp2BKTAL] = 0xC000
 	writeVRAM16(v, 0x58000, 0xFC00)
+	v.regs[vdp2SPCTL] = 0x0012
 	v.regs[vdp2WCTLA] = 0x0020
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
@@ -176,42 +181,46 @@ func goldenHiResSpriteWindowCC(t *testing.T) *VDP2 {
 		off := (y*512 + 1) * 2
 		data[off] = 0x80
 	}
-	renderTestFrameFB(v, vdp1FBView{data: data, width: 512, height: 256})
-	return v
+	renderTestFrameFB(v, swr, vdp1FBView{data: data, width: 512, height: 256})
+	return v, swr
 }
 
 // goldenLSMD3LineScroll is a double-density interlace frame (both fields
 // rendered) of NBG0 with a per-displayed-line horizontal scroll table.
-func goldenLSMD3LineScroll(t *testing.T) *VDP2 {
+func goldenLSMD3LineScroll(t *testing.T) (*VDP2, *softwareRenderer) {
 	v := setupNBG0LineScrollScene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2SCRCTL] = 0x0002
 	for line := uint32(0); line < 448; line++ {
 		writeLineScrollEntry(v, 0x20000+line*4, uint16(line%8), 0)
 	}
 	setLSMD3(v, false)
-	renderTestFrame(v)
+	swr.beginFrame() // the frame start where the geometry changed
+	renderTestFrame(v, swr)
 	setLSMD3(v, true)
-	renderTestFrame(v)
-	return v
+	renderTestFrame(v, swr)
+	return v, swr
 }
 
 // goldenSixLayers352 is the six-layer scene at 352 dots.
-func goldenSixLayers352(t *testing.T) *VDP2 {
+func goldenSixLayers352(t *testing.T) (*VDP2, *softwareRenderer) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x8001
 	v.recalcTiming()
-	renderTestFrameFB(v, fb)
-	return v
+	renderTestFrameFB(v, swr, fb)
+	return v, swr
 }
 
 // goldenSixLayersPAL256 is the six-layer scene on a PAL 256-line frame.
-func goldenSixLayersPAL256(t *testing.T) *VDP2 {
+func goldenSixLayersPAL256(t *testing.T) (*VDP2, *softwareRenderer) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.SetPAL(true)
 	v.regs[vdp2TVMD] = 0x8020
 	v.recalcTiming()
-	renderTestFrameFB(v, fb)
-	return v
+	renderTestFrameFB(v, swr, fb)
+	return v, swr
 }
 
 // goldenFullFrame is a scene with content on every row: an NBG0 gradient
@@ -219,8 +228,9 @@ func goldenSixLayersPAL256(t *testing.T) *VDP2 {
 // gradient bitmap (priority 3) color-calculating against an EXBG
 // position-encoded frame (priority 2), and a sprite dot pattern
 // (priority 5).
-func goldenFullFrame(t *testing.T) *VDP2 {
+func goldenFullFrame(t *testing.T) (*VDP2, *softwareRenderer) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BGON] = 0x0001 | 1<<4
 	// NBG0: 256-color bitmap 512x256, dot = (x*3 + y) & 0xFF.
 	v.regs[vdp2CHCTLA] = 0x0012
@@ -282,8 +292,8 @@ func goldenFullFrame(t *testing.T) *VDP2 {
 			}
 		}
 	}
-	renderTestFrameFB(v, fb)
-	return v
+	renderTestFrameFB(v, swr, fb)
+	return v, swr
 }
 
 // TestGoldenVDP2Scenes pins the software renderer's output on full-frame
@@ -302,32 +312,32 @@ func TestGoldenVDP2Scenes(t *testing.T) {
 	}
 	scenes := []struct {
 		name  string
-		build func(t *testing.T) *VDP2
+		build func(t *testing.T) (*VDP2, *softwareRenderer)
 		want  []uint32
 	}{
-		{"six layers 320x224", goldenSixLayers, repeatHash(0x91E4D22D, 0xD3B468C5, 28)},
+		{"six layers 320x224", goldenSixLayers, repeatHash(0x2F857895, 0x624075C5, 28)},
 		{"RBG0 window coefficient line color", goldenRBG0WindowCoefficient, []uint32{
-			0xA3A41DF5, 0x70DF95C5, 0xDAC29A85, 0x70DF95C5, 0xDAC29A85, 0x70DF95C5, 0xDAC29A85,
-			0x70DF95C5, 0xDAC29A85, 0x70DF95C5, 0xDAC29A85, 0x70DF95C5, 0x4A9D1FA8, 0xDF66A7E5,
-			0x91B51445, 0xDF66A7E5, 0x91B51445, 0xDF66A7E5, 0x91B51445, 0xDF66A7E5, 0x91B51445,
-			0xDF66A7E5, 0x91B51445, 0xDF66A7E5, 0x91B51445, 0xDF66A7E5, 0x91B51445, 0xDF66A7E5,
+			0x76A8DE85, 0x6FFD3545, 0x018D4945, 0x6FFD3545, 0x018D4945, 0x6FFD3545, 0x018D4945,
+			0x6FFD3545, 0x018D4945, 0x6FFD3545, 0x018D4945, 0x6FFD3545, 0xA5760B1C, 0x58E53E45,
+			0x00813E45, 0x58E53E45, 0x00813E45, 0x58E53E45, 0x00813E45, 0x58E53E45, 0x00813E45,
+			0x58E53E45, 0x00813E45, 0x58E53E45, 0x00813E45, 0x58E53E45, 0x00813E45, 0x58E53E45,
 		}},
-		{"RBG1 over RBG0", goldenRBG1OverRBG0, append([]uint32{0x434771F5, 0xAF20B725}, repeatHash(0x6CE75CC5, 0x6CE75CC5, 26)...)},
-		{"hi-res sprite window CC", goldenHiResSpriteWindowCC, repeatHash(0x1E57C155, 0x8340A5C5, 28)},
-		{"LSMD3 line scroll both fields", goldenLSMD3LineScroll, repeatHash(0x62A0EF51, 0x030A0FC5, 56)},
-		{"six layers 352 wide", goldenSixLayers352, repeatHash(0xA63F7CAD, 0x7B7CE345, 28)},
-		{"six layers PAL 256 lines", goldenSixLayersPAL256, repeatHash(0x91E4D22D, 0xD3B468C5, 32)},
+		{"RBG1 over RBG0", goldenRBG1OverRBG0, append([]uint32{0x2538A6E5, 0x08E13D65}, repeatHash(0x6CE75CC5, 0x6CE75CC5, 26)...)},
+		{"hi-res sprite window CC", goldenHiResSpriteWindowCC, repeatHash(0xF9499B75, 0x9F363AC5, 28)},
+		{"LSMD3 line scroll both fields", goldenLSMD3LineScroll, repeatHash(0x9DCF8325, 0x11A349C5, 56)},
+		{"six layers 352 wide", goldenSixLayers352, repeatHash(0x32273095, 0xD58271C5, 28)},
+		{"six layers PAL 256 lines", goldenSixLayersPAL256, repeatHash(0x2F857895, 0x624075C5, 32)},
 		{"full frame", goldenFullFrame, []uint32{
-			0x0264A601, 0x65869440, 0xA9E8C71D, 0x2F8DE399, 0xD92E700C, 0x239402BD, 0x5B3206DD,
-			0x0D54BAAF, 0x4F3BA1D9, 0xDEDB10EC, 0x37B83DD4, 0x408BFAF9, 0xA5C2A969, 0x62B42088,
-			0xC45BB989, 0x009DD2A3, 0x3C456790, 0x9EBE5294, 0x66C5919D, 0x151243B6, 0xD18FCE1A,
-			0xF3ABA1CD, 0x018D0527, 0x4ADF0307, 0xA1A1954E, 0x3BD5DC6E, 0x997B93EE, 0x0EC9255D,
+			0x63C73B25, 0xCD9D541A, 0xFC2F5E5D, 0x0DA82156, 0xA3912F51, 0xDF54E2DF, 0x445AD104,
+			0x79B0A1A6, 0x2B697124, 0x6D925D8A, 0xF933DE9D, 0x62C542FC, 0x42AD616D, 0xF51895D7,
+			0xEDE846C0, 0xF1E7853E, 0xDB5D34B0, 0x4194F6C4, 0x7D8FE5CC, 0x583AF314, 0xC48B2F6A,
+			0xEF7E6A3B, 0x2DA16221, 0xE750609E, 0xE22492CB, 0xFE17574E, 0xD13C23B3, 0x37D45916,
 		}},
 	}
 	for _, s := range scenes {
 		t.Run(s.name, func(t *testing.T) {
-			v := s.build(t)
-			checkBands(t, s.name, vdp2BandHashes(v), s.want, describeVDP2Band(v))
+			v, swr := s.build(t)
+			checkBands(t, s.name, vdp2BandHashes(v, swr), s.want, describeVDP2Band(v, swr))
 		})
 	}
 }

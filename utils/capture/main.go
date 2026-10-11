@@ -51,6 +51,8 @@ func main() {
 	fastBoot := flag.Bool("fast-boot", false, "Skip the real BIOS boot animation and enter the disc IP directly (real BIOS only; no effect with the HLE BIOS).")
 	outDir := flag.String("out", "capture_output", "Output root directory for captured artifacts (created if missing).")
 	loadState := flag.String("load-state", "", "Path to a save state file to load at startup, replaying inputs from there. Requires the same disc and BIOS the state was captured with; the replay must have been recorded from this state.")
+	renderer := flag.String("renderer", "gpu", "Renderer: gpu (fails if the GPU renderer cannot initialize) or software.")
+	upscale := flag.String("upscale", "1x", "Internal resolution: 1x (native), 2x, 4x, 8x, or 16x.")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: capture [flags] <disc> <replay>")
 		flag.PrintDefaults()
@@ -65,6 +67,12 @@ func main() {
 	replayPath := flag.Arg(1)
 
 	emu := core.NewEmulator()
+	if err := emu.SetUpscale(*upscale); err != nil {
+		log.Fatalf("upscale: %v", err)
+	}
+	if err := emu.SetRendererByName(*renderer); err != nil {
+		log.Fatalf("renderer: %v", err)
+	}
 
 	if *biosPath != "" {
 		biosData, err := os.ReadFile(*biosPath)
@@ -145,6 +153,8 @@ func main() {
 
 	fmt.Fprintf(echo, "[CAPTURE] replaying %s (%d frames, %d screenshots), disc=%s -> %s\n",
 		replayPath, rf.Frames, len(rf.Screenshots), id, shotsDir)
+	fmt.Fprintf(logFile, "[RENDER] renderer: %s\n", emu.RendererName())
+	gpuFellBack := false
 
 	start := time.Now()
 	wd := newWatchdog(start, io.MultiWriter(os.Stderr, logFile))
@@ -195,6 +205,10 @@ func main() {
 		emu.RunFrame()
 		runDur := time.Since(runStart)
 		wd.frameDone()
+		if err := emu.GPUError(); err != nil && !gpuFellBack {
+			gpuFellBack = true
+			fmt.Fprintf(logFile, "[RENDER] frame %d: GPU renderer failed, now software: %v\n", frameNum, err)
+		}
 
 		windowFrames++
 		if runDur < frameTimeMin {

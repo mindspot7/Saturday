@@ -1,6 +1,10 @@
 package core
 
-import "testing"
+import (
+	"github.com/user-none/erings/core/compute"
+	"github.com/user-none/erings/core/compute/screen"
+	"testing"
+)
 
 // TestDecodeSpritePixel16BitTypes verifies the palette-format field
 // layouts of sprite types 2, 3, 4, 6, and 7 (VDP2 manual Figure 9.1):
@@ -45,16 +49,36 @@ func TestDecodeSpritePixel16BitTypes(t *testing.T) {
 		v.regs[vdp2PRISD] = 0x0706
 		v.cram[tc.wantDC*2], v.cram[tc.wantDC*2+1] = 0x00, 0x1F // red
 		v.BeginFrame()
-		pri, cc, msb, r, g, b := v.decodeSpritePixel(tc.pixel)
+		pri, cc, msb, r, g, b := decodeSpriteTest(v, tc.pixel)
 		if pri != tc.wantPri || cc != tc.wantCC || msb != tc.wantMSB {
 			t.Errorf("type %d pixel 0x%04X: pri=%d cc=%d msb=%v, want %d %d %v",
 				tc.sptype, tc.pixel, pri, cc, msb, tc.wantPri, tc.wantCC, tc.wantMSB)
 		}
-		if r != 255 || g != 0 || b != 0 {
+		if r != 248 || g != 0 || b != 0 {
 			t.Errorf("type %d pixel 0x%04X: color (%d,%d,%d), want red from CRAM entry 0x%03X",
 				tc.sptype, tc.pixel, r, g, b, tc.wantDC)
 		}
 	}
+}
+
+// spriteDecodeOf builds the row sprite decode from the current frame
+// registers for direct decode tests.
+func spriteDecodeOf(v *VDP2) *screen.SpriteDecode {
+	d := v.buildSpriteDecode()
+	return &d
+}
+
+// decodeSpriteTest decodes a sprite pixel against the current CRAM
+// and returns the renderer's 8-bit fields.
+func decodeSpriteTest(v *VDP2, pixel uint16) (pri, cc uint8, msb bool, r, g, b uint8) {
+	v.buildCRAMCache()
+	p, c, m, rgb := spriteDecodeOf(v).Decode(&v.palette, uint32(v.frame.cramMode), uint32(pixel))
+	return uint8(p), uint8(c), m, uint8(screen.ColorR(rgb)), uint8(screen.ColorG(rgb)), uint8(screen.ColorB(rgb))
+}
+
+// shadowTest classifies a sprite pixel's shadow.
+func shadowTest(v *VDP2, pixel uint16) int {
+	return int(spriteDecodeOf(v).Shadow(uint32(pixel)))
 }
 
 // TestDecodeSpritePixel8BitSharedTypes verifies sprite types D, E, and F
@@ -88,16 +112,37 @@ func TestDecodeSpritePixel8BitSharedTypes(t *testing.T) {
 		dc := uint32(tc.pixel & 0xFF)
 		v.cram[dc*2], v.cram[dc*2+1] = 0x03, 0xE0 // green
 		v.BeginFrame()
-		pri, cc, msb, r, g, b := v.decodeSpritePixel(tc.pixel)
+		pri, cc, msb, r, g, b := decodeSpriteTest(v, tc.pixel)
 		if pri != tc.wantPri || cc != tc.wantCC || msb != tc.wantMSB {
 			t.Errorf("type %X pixel 0x%02X: pri=%d cc=%d msb=%v, want %d %d %v",
 				tc.sptype, tc.pixel, pri, cc, msb, tc.wantPri, tc.wantCC, tc.wantMSB)
 		}
-		if r != 0 || g != 255 || b != 0 {
+		if r != 0 || g != 248 || b != 0 {
 			t.Errorf("type %X pixel 0x%02X: color (%d,%d,%d), want green from CRAM entry 0x%02X",
 				tc.sptype, tc.pixel, r, g, b, dc)
 		}
 	}
+}
+
+// testVDP1Pixel reads the sprite pixel at column x of field-line y
+// through the row read the composite uses, dispatching on the row's
+// mode as the composite does; zero when the frame buffer is absent or
+// the column is past it.
+func testVDP1Pixel(v *VDP2, x, y int) uint32 {
+	if v.lineFB.data == nil {
+		return 0
+	}
+	fb := compute.VDP1FB(v.lineFB.data)
+	r := v.spriteRow(y)
+	switch r.Mode {
+	case screen.SpriteRead16:
+		return screen.SpritePixel16(fb, &r, int32(x))
+	case screen.SpriteRead8:
+		return screen.SpritePixel8(fb, &r, int32(x))
+	case screen.SpriteReadRotated:
+		return screen.SpritePixelRotated(fb, &r, int32(x))
+	}
+	return 0
 }
 
 // TestReadVDP1PixelHiRes verifies the framebuffer read under VDP2 hi-res:
@@ -117,8 +162,8 @@ func TestReadVDP1PixelHiRes(t *testing.T) {
 		x    int
 		want uint16
 	}{{6, 5}, {7, 5}, {8, 6}, {9, 6}} {
-		if pix, ok := v.readVDP1Pixel(tc.x, 0); !ok || pix != tc.want {
-			t.Errorf("16bpp hi-res x=%d: pixel=0x%04X ok=%v, want 0x%04X", tc.x, pix, ok, tc.want)
+		if pix := testVDP1Pixel(v, tc.x, 0); pix != uint32(tc.want) {
+			t.Errorf("16bpp hi-res x=%d: pixel=0x%04X, want 0x%04X", tc.x, pix, tc.want)
 		}
 	}
 
@@ -126,17 +171,17 @@ func TestReadVDP1PixelHiRes(t *testing.T) {
 	fb8[6] = 5
 	fb8[7] = 6
 	v.lineFB = vdp1FBView{data: fb8, is8bpp: true, width: 1024, height: 256}
-	if pix, ok := v.readVDP1Pixel(6, 0); !ok || pix != 5 {
-		t.Errorf("8bpp hi-res x=6: pixel=0x%04X ok=%v, want 5", pix, ok)
+	if pix := testVDP1Pixel(v, 6, 0); pix != 5 {
+		t.Errorf("8bpp hi-res x=6: pixel=0x%04X, want 5", pix)
 	}
-	if pix, ok := v.readVDP1Pixel(7, 0); !ok || pix != 6 {
-		t.Errorf("8bpp hi-res x=7: pixel=0x%04X ok=%v, want 6", pix, ok)
+	if pix := testVDP1Pixel(v, 7, 0); pix != 6 {
+		t.Errorf("8bpp hi-res x=7: pixel=0x%04X, want 6", pix)
 	}
-	if _, ok := v.readVDP1Pixel(8, 0); ok {
-		t.Error("8bpp zero pixel should read as not valid")
+	if pix := testVDP1Pixel(v, 8, 0); pix != 0 {
+		t.Errorf("8bpp zero pixel read as 0x%04X, want 0", pix)
 	}
-	if _, ok := v.readVDP1Pixel(1024, 0); ok {
-		t.Error("8bpp x past the framebuffer width should read as not valid")
+	if pix := testVDP1Pixel(v, 1024, 0); pix != 0 {
+		t.Errorf("8bpp x past the framebuffer width read as 0x%04X, want 0", pix)
 	}
 }
 
@@ -168,8 +213,8 @@ func setFBPixel16(fb vdp1FBView, x, y int, val uint16) {
 }
 
 // outRGB returns the composited output color at (x, y).
-func outRGB(v *VDP2, x, y int) (r, g, b uint8) {
-	fb := v.Framebuffer()
+func outRGB(v *VDP2, swr *softwareRenderer, x, y int) (r, g, b uint8) {
+	fb := swr.framebuffer()
 	off := (y*int(v.activeWidth) + x) * 4
 	return fb[off], fb[off+1], fb[off+2]
 }
@@ -182,23 +227,24 @@ func outRGB(v *VDP2, x, y int) (r, g, b uint8) {
 func TestReadVDP1PixelRotated(t *testing.T) {
 	// DX = 0, DY = 1: screen (x, y) reads framebuffer (0, x + y).
 	v, fb := setupRotatedSpriteScene(t, 0x0000, 0x0001)
+	swr := newSoftwareRenderer(v)
 	setFBPixel16(fb, 0, 0, 0x0009) // green
 	setFBPixel16(fb, 0, 5, 0x0005) // red
 	setFBPixel16(fb, 3, 0, 0x0005) // never sampled (X stays 0)
-	renderTestFrameFB(v, fb)
-	if r, g, _ := outRGB(v, 0, 0); r != 0 || g != 255 {
+	renderTestFrameFB(v, swr, fb)
+	if r, g, _ := outRGB(v, swr, 0, 0); r != 0 || g != 248 {
 		t.Errorf("(0,0) -> fb(0,0): got (%d,%d), want green", r, g)
 	}
-	if r, g, _ := outRGB(v, 5, 0); r != 255 || g != 0 {
+	if r, g, _ := outRGB(v, swr, 5, 0); r != 248 || g != 0 {
 		t.Errorf("(5,0) -> fb(0,5): got (%d,%d), want red", r, g)
 	}
-	if r, g, _ := outRGB(v, 2, 3); r != 255 || g != 0 {
+	if r, g, _ := outRGB(v, swr, 2, 3); r != 248 || g != 0 {
 		t.Errorf("(2,3) -> fb(0,5): got (%d,%d), want red", r, g)
 	}
-	if r, g, b := outRGB(v, 3, 0); r != 0 || g != 0 || b != 0 {
+	if r, g, b := outRGB(v, swr, 3, 0); r != 0 || g != 0 || b != 0 {
 		t.Errorf("(3,0) -> fb(0,3): got (%d,%d,%d), want transparent (black)", r, g, b)
 	}
-	if r, g, b := outRGB(v, 300, 0); r != 0 || g != 0 || b != 0 {
+	if r, g, b := outRGB(v, swr, 300, 0); r != 0 || g != 0 || b != 0 {
 		t.Errorf("(300,0) -> fb(0,300) out of range: got (%d,%d,%d), want transparent", r, g, b)
 	}
 }
@@ -209,27 +255,29 @@ func TestReadVDP1PixelRotated(t *testing.T) {
 func TestReadVDP1PixelRotatedRPRCTL(t *testing.T) {
 	// DX = 0, DY = 0: screen (x, y) reads framebuffer (Xst, y).
 	v, fb := setupRotatedSpriteScene(t, 0x0000, 0x0000)
+	swr := newSoftwareRenderer(v)
 	for y := 0; y < 16; y++ {
 		setFBPixel16(fb, 0, y, 0x0005) // column 0 red
 		setFBPixel16(fb, 1, y, 0x0009) // column 1 green
 	}
 	v.BeginFrame()
+	swr.beginFrame()
 	v.vLine = 5
 	v.Write(uint32(vdp2RPRCTL*2), 0x0001)
 	for y := 0; y < 8; y++ {
 		if y == 3 {
 			writeRotParam32(v, 0x10000, 0x00, 0x0001, 0x0000) // Xst = 1
 		}
-		v.RenderLine(y, fb)
+		v.renderLineTest(swr, y, fb)
 	}
-	if r, _, _ := outRGB(v, 10, 4); r != 255 {
-		t.Errorf("line 4 before the arm: red %d, want 255 (column 0)", r)
+	if r, _, _ := outRGB(v, swr, 10, 4); r != 248 {
+		t.Errorf("line 4 before the arm: red %d, want 248 (column 0)", r)
 	}
-	if _, g, _ := outRGB(v, 10, 5); g != 255 {
-		t.Errorf("armed line 5: green %d, want 255 (column 1)", g)
+	if _, g, _ := outRGB(v, swr, 10, 5); g != 248 {
+		t.Errorf("armed line 5: green %d, want 248 (column 1)", g)
 	}
-	if _, g, _ := outRGB(v, 10, 7); g != 255 {
-		t.Errorf("line 7 after the arm: green %d, want 255 (column 1)", g)
+	if _, g, _ := outRGB(v, swr, 10, 7); g != 248 {
+		t.Errorf("line 7 after the arm: green %d, want 248 (column 1)", g)
 	}
 }
 
@@ -237,6 +285,7 @@ func TestReadVDP1PixelRotatedRPRCTL(t *testing.T) {
 // start by the displayed line (2y + field) in double-density interlace.
 func TestReadVDP1PixelRotatedLSMD3(t *testing.T) {
 	v, fb := setupRotatedSpriteScene(t, 0x0000, 0x0000)
+	swr := newSoftwareRenderer(v)
 	for y := 0; y < 32; y++ {
 		val := uint16(0x0005) // even rows red
 		if y&1 == 1 {
@@ -245,15 +294,17 @@ func TestReadVDP1PixelRotatedLSMD3(t *testing.T) {
 		setFBPixel16(fb, 0, y, val)
 	}
 	setLSMD3(v, true)
+	swr.beginFrame() // the frame start where the geometry changed
 	v.BeginFrame()
-	v.RenderLine(0, fb)
-	v.RenderLine(1, fb)
+	swr.beginFrame()
+	v.renderLineTest(swr, 0, fb)
+	v.renderLineTest(swr, 1, fb)
 	// Field 1 line 0 is displayed line 1: reads framebuffer row 1.
-	if _, g, _ := outRGB(v, 10, 1); g != 255 {
-		t.Errorf("field 1 line 0 -> fb row 1: green %d, want 255", g)
+	if _, g, _ := outRGB(v, swr, 10, 1); g != 248 {
+		t.Errorf("field 1 line 0 -> fb row 1: green %d, want 248", g)
 	}
-	if _, g, _ := outRGB(v, 10, 3); g != 255 {
-		t.Errorf("field 1 line 1 -> fb row 3: green %d, want 255", g)
+	if _, g, _ := outRGB(v, swr, 10, 3); g != 248 {
+		t.Errorf("field 1 line 1 -> fb row 3: green %d, want 248", g)
 	}
 }
 
@@ -261,6 +312,7 @@ func TestReadVDP1PixelRotatedLSMD3(t *testing.T) {
 // the parameter A Yst re-read arm (RPRCTL bit 1).
 func TestSpriteRotationYstReRead(t *testing.T) {
 	v, fb := setupRotatedSpriteScene(t, 0x0000, 0x0000)
+	swr := newSoftwareRenderer(v)
 	for y := 0; y < 32; y++ {
 		val := uint16(0x0005) // rows 0..15 red
 		if y >= 16 {
@@ -269,18 +321,19 @@ func TestSpriteRotationYstReRead(t *testing.T) {
 		setFBPixel16(fb, 0, y, val)
 	}
 	v.BeginFrame()
+	swr.beginFrame()
 	v.vLine = 5
 	v.Write(uint32(vdp2RPRCTL*2), 0x0002)
 	for y := 0; y < 8; y++ {
 		if y == 3 {
 			writeRotParam32(v, 0x10000, 0x04, 16, 0x0000) // Yst = 16
 		}
-		v.RenderLine(y, fb)
+		v.renderLineTest(swr, y, fb)
 	}
-	if r, _, _ := outRGB(v, 10, 4); r != 255 {
-		t.Errorf("line 4 before the arm: red %d, want 255 (row 4)", r)
+	if r, _, _ := outRGB(v, swr, 10, 4); r != 248 {
+		t.Errorf("line 4 before the arm: red %d, want 248 (row 4)", r)
 	}
-	if _, g, _ := outRGB(v, 10, 5); g != 255 {
-		t.Errorf("armed line 5: green %d, want 255 (row 16)", g)
+	if _, g, _ := outRGB(v, swr, 10, 5); g != 248 {
+		t.Errorf("armed line 5: green %d, want 248 (row 16)", g)
 	}
 }

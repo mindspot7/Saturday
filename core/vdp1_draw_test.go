@@ -3,7 +3,11 @@
 
 package core
 
-import "testing"
+import (
+	"github.com/user-none/erings/core/compute"
+	"github.com/user-none/erings/core/compute/draw"
+	"testing"
+)
 
 // writeCmd16 writes a big-endian 16-bit value to VDP1 VRAM at the given address.
 func writeCmd16(v *VDP1, addr uint32, val uint16) {
@@ -15,6 +19,10 @@ func writeCmd16(v *VDP1, addr uint32, val uint16) {
 func writeDrawEnd(v *VDP1, addr uint32) {
 	writeCmd16(v, addr+0x00, 0x8000) // CMDCTRL with end bit
 }
+
+// vdp1FBStride is the frame buffer width in pixels for TVM=000 (normal
+// 16-bit), the mode the tests' pixel readers address rows by.
+const vdp1FBStride = 512
 
 // readFBPixel reads a 16-bit pixel from the draw frame buffer at (x,y).
 func readFBPixel(v *VDP1, x, y int) uint16 {
@@ -1623,12 +1631,12 @@ func TestVBlankOutNoSwapFCT0(t *testing.T) {
 	}
 }
 
-// TestVBlankOutDIESkip confirms DIE=1 (double-density interlace) does
-// not swap at VBlankOut; that path is owned by VBlankIn for
-// per-field bookkeeping. DIE bit (FBCR bit 3) is shadow-deferred so
-// latchPending() simulates the line-224 commit before the line-0
-// VBlankOut runs.
-func TestVBlankOutDIESkip(t *testing.T) {
+// TestVBlankOutDIESwaps confirms DIE=1 (double-density interlace)
+// takes the ordinary change paths: a manual change (FCM=1, FCT=1)
+// swaps at VBlankOut under DIE as it does without it. DIE bit (FBCR
+// bit 3) is shadow-deferred so latchPending() simulates the line-224
+// commit before the line-0 VBlankOut runs.
+func TestVBlankOutDIESwaps(t *testing.T) {
 	v := NewVDP1(NewSCU())
 	v.Write(0x02, 0x0B) // DIE=1, FCM=1, FCT=1
 	v.latchPending()    // commit DIE into active fbcr
@@ -1638,8 +1646,8 @@ func TestVBlankOutDIESkip(t *testing.T) {
 
 	v.VBlankOut()
 
-	if &v.drawFB[0] != preDraw || &v.displayFB[0] != preDisplay {
-		t.Error("VBlankOut swapped under DIE=1; DIE bookkeeping must stay in VBlankIn")
+	if &v.drawFB[0] != preDisplay || &v.displayFB[0] != preDraw {
+		t.Error("VBlankOut did not swap the manual change under DIE=1")
 	}
 }
 
@@ -2328,9 +2336,9 @@ func TestDDAEdgeStartExact(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := initDDAEdge(tc.x1, tc.y1, tc.x2, tc.y2, tc.steps)
-			if e.intX() != tc.x1 || e.intY() != tc.y1 {
-				t.Errorf("start=(%d,%d), want (%d,%d)", e.intX(), e.intY(), tc.x1, tc.y1)
+			x, y := draw.EdgeAt(int32(tc.x1), int32(tc.y1), int32(tc.x2), int32(tc.y2), int32(tc.steps), 0)
+			if int(x) != tc.x1 || int(y) != tc.y1 {
+				t.Errorf("start=(%d,%d), want (%d,%d)", x, y, tc.x1, tc.y1)
 			}
 		})
 	}
@@ -2353,14 +2361,11 @@ func TestDDAEdgeEndClose(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			e := initDDAEdge(tc.x1, tc.y1, tc.x2, tc.y2, tc.steps)
-			for i := 0; i < tc.steps; i++ {
-				e.step()
-			}
-			dx := e.intX() - tc.x2
-			dy := e.intY() - tc.y2
+			x, y := draw.EdgeAt(int32(tc.x1), int32(tc.y1), int32(tc.x2), int32(tc.y2), int32(tc.steps), int32(tc.steps))
+			dx := int(x) - tc.x2
+			dy := int(y) - tc.y2
 			if dx < -1 || dx > 1 || dy < -1 || dy > 1 {
-				t.Errorf("end=(%d,%d), want within 1 of (%d,%d)", e.intX(), e.intY(), tc.x2, tc.y2)
+				t.Errorf("end=(%d,%d), want within 1 of (%d,%d)", x, y, tc.x2, tc.y2)
 			}
 		})
 	}
@@ -2506,29 +2511,31 @@ func TestDrawPolygonDegenerateThinSliver(t *testing.T) {
 	drainDrawing(v)
 
 	// Both control edges are walked and the connecting lines (A->B at
-	// step 0, D->C at step 1) are X-dominant Bresenham lines. Their
-	// pixels form the diagonal sliver.
-	// Expected coverage (from the X-dominant connecting-line DDA):
-	//   y=30: x in {20..29} from line A->B and {20..28} from line D->C
-	//          union = {20..29} -> 10 pixels
-	//   y=31: x = 29 (line A->B endpoint) and x = 30 (line D->C endpoint)
-	//          range [29..30] -> 2 pixels
-	for x := 20; x <= 29; x++ {
+	// step 0, D->C at step 1) are X-major lines whose y rounds to the
+	// nearest row, a half way position rounding toward the start.
+	// Their pixels form the diagonal sliver.
+	// Expected coverage:
+	//   A->B over 9 steps: y=30 at x 20..24, y=31 at x 25..29, and
+	//          the hole fill dot (25,30) at the diagonal step.
+	//   D->C over 10 steps: y=30 at x 20..25 (x=25 is half way),
+	//          y=31 at x 26..30, and the hole fill dot (26,30).
+	//   y=30: union {20..26} -> 7 pixels
+	//   y=31: union {25..30} -> 6 pixels
+	for x := 20; x <= 26; x++ {
 		if got := readFBPixel(v, x, 30); got != 0xCDEF {
 			t.Errorf("px(%d,30) = 0x%04X, want 0xCDEF", x, got)
 		}
 	}
-	for x := 29; x <= 30; x++ {
+	for x := 25; x <= 30; x++ {
 		if got := readFBPixel(v, x, 31); got != 0xCDEF {
 			t.Errorf("px(%d,31) = 0x%04X, want 0xCDEF", x, got)
 		}
 	}
 	// Outside the sliver should be empty.
-	if got := readFBPixel(v, 19, 30); got != 0 {
-		t.Errorf("px(19,30) = 0x%04X, want 0x0000", got)
-	}
-	if got := readFBPixel(v, 28, 31); got != 0 {
-		t.Errorf("px(28,31) = 0x%04X, want 0x0000", got)
+	for _, p := range [][2]int{{19, 30}, {27, 30}, {24, 31}} {
+		if got := readFBPixel(v, p[0], p[1]); got != 0 {
+			t.Errorf("px(%d,%d) = 0x%04X, want 0x0000", p[0], p[1], got)
+		}
 	}
 }
 
@@ -4852,48 +4859,41 @@ func TestWritePixel8bpp_RestrictionsEnforced(t *testing.T) {
 	}
 }
 
-func TestFloorDiv64(t *testing.T) {
-	cases := []struct {
-		a, b, want int64
-	}{
-		{10, 3, 3},   // positive: 10/3 = 3.33 -> 3
-		{-10, 3, -4}, // negative dividend: -10/3 = -3.33 -> -4
-		{10, -3, -4}, // negative divisor: 10/-3 = -3.33 -> -4
-		{-10, -3, 3}, // both negative: -10/-3 = 3.33 -> 3
-		{9, 3, 3},    // exact division
-		{-9, 3, -3},  // exact negative
-		{0, 5, 0},    // zero
-		{7, 1, 7},    // divisor 1
-		{-7, 1, -7},  // negative with divisor 1
-	}
-	for _, tc := range cases {
-		got := floorDiv64(tc.a, tc.b)
-		if got != tc.want {
-			t.Errorf("floorDiv64(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+// TestDDAEdgeRounding verifies the side edge DDAs round to the
+// nearest dot, a position half way between two dots taking the dot
+// toward the start point on the A-D edge and the dot away from it on
+// the B-C edge.
+func TestDDAEdgeRounding(t *testing.T) {
+	// A-D edge from (7, 0) to (0, 0) in 3 steps: 7, 4.67, 2.33, 0.
+	for i, want := range []int32{7, 5, 2, 0} {
+		if x, _ := draw.EdgeAt(7, 0, 0, 0, 3, int32(i)); x != want {
+			t.Errorf("(7,0)-(0,0) step %d: x=%d, want %d", i, x, want)
 		}
 	}
-}
-
-func TestDDAEdgeFloorDivision(t *testing.T) {
-	// Verify DDA with negative delta uses floor division.
-	// Edge from (7, 0) to (0, 0) in 3 steps.
-	// floorDiv64(-7<<16, 3) = floorDiv64(-458752, 3) = -152918
-	// Step 0: x = 7
-	// Step 1: xFP = 7<<16 + -152918 = 305818, x = 305818>>16 = 4
-	// Step 2: xFP = 305818 + -152918 = 152900, x = 152900>>16 = 2
-	// Step 3: xFP = 152900 + -152918 = -18, x = -18>>16 = -1
-	// (rendering code forces exact endpoint on last step)
-	e := initDDAEdge(7, 0, 0, 0, 3)
-	if e.intX() != 7 {
-		t.Errorf("step 0: x=%d, want 7", e.intX())
+	// A-D edge from (184, 132) to (185, 136) in 4 steps: x 184,
+	// 184.25, 184.5, 184.75, 185, the half way step toward 184.
+	for i, want := range []int32{184, 184, 184, 185, 185} {
+		if x, _ := draw.EdgeAt(184, 132, 185, 136, 4, int32(i)); x != want {
+			t.Errorf("(184,132)-(185,136) step %d: x=%d, want %d", i, x, want)
+		}
 	}
-	e.step()
-	if e.intX() != 4 {
-		t.Errorf("step 1: x=%d, want 4", e.intX())
+	// A-D edge from (186, 153) to (185, 163) in 10 steps: x 185.5 at
+	// step 5, toward 186.
+	if x, _ := draw.EdgeAt(186, 153, 185, 163, 10, 5); x != 186 {
+		t.Errorf("(186,153)-(185,163) step 5: x=%d, want 186", x)
 	}
-	e.step()
-	if e.intX() != 2 {
-		t.Errorf("step 2: x=%d, want 2", e.intX())
+	// B-C edge from (185, 163) to (197, 147) in 16 steps: x 189.5 at
+	// step 6 and 192.5 at step 10, away from 185.
+	if x, _ := draw.RightEdgeAt(185, 163, 197, 147, 16, 6); x != 190 {
+		t.Errorf("(185,163)-(197,147) step 6: x=%d, want 190", x)
+	}
+	if x, _ := draw.RightEdgeAt(185, 163, 197, 147, 16, 10); x != 193 {
+		t.Errorf("(185,163)-(197,147) step 10: x=%d, want 193", x)
+	}
+	// B-C edge from (166, 136) to (154, 147) in 12 steps: y 141.5 at
+	// step 6, away from 136.
+	if _, y := draw.RightEdgeAt(166, 136, 154, 147, 12, 6); y != 142 {
+		t.Errorf("(166,136)-(154,147) step 6: y=%d, want 142", y)
 	}
 }
 
@@ -4901,11 +4901,12 @@ func TestDDAEdgeFloorDivision(t *testing.T) {
 
 // dieTestVDP1 returns a VDP1 with DIE active and the given DIL bit in
 // TVM=0 (normal 16bpp FB) - the Thunder Force V title configuration.
-// Double interlace doubles the Y range and pins each parity to its
-// buffer regardless of color depth (manual Table 1.2), so this exercises
-// the same routing/halving as the 8bpp setups (TestDIEDoubledYRoutesByParity
-// etc.) with 16bpp pixels. FBCR DIE/DIL are shadow-deferred, so the
-// write is committed with latchPending.
+// Double interlace doubles the Y range regardless of color depth
+// (manual Table 1.2) and DIL selects the parity that lands, so this
+// exercises the same halving and parity filter as the 8bpp setups
+// (TestDIEDoubledYRoutesByParity etc.) with 16bpp pixels. FBCR
+// DIE/DIL are shadow-deferred, so the write is committed with
+// latchPending.
 func dieTestVDP1(dil bool) (*VDP1, int, int) {
 	v := NewVDP1(NewSCU())
 	fbcr := uint16(0x08)
@@ -4919,130 +4920,102 @@ func dieTestVDP1(dil bool) (*VDP1, int, int) {
 	return v, clipX, clipY
 }
 
-func TestDIEDilRoutesToFB(t *testing.T) {
-	// DIE=1 + TVM=0: double interlace halves Y and routes by parity even
-	// at 16bpp. DIL=0 plots even display lines into drawFB; DIL=1 plots
-	// odd display lines into displayFB. Both land at physical row Y/2.
+func TestDIEDilRoutesToDrawFB(t *testing.T) {
+	// DIE=1 + TVM=0: double interlace halves Y and filters by parity
+	// even at 16bpp. DIL=0 plots even display lines and DIL=1 odd
+	// display lines, both into the draw buffer at physical row Y/2;
+	// the display buffer is never drawn into.
 	// DIL=0: Y=10 (even) -> drawFB row 5.
 	v0, clipX, clipY := dieTestVDP1(false)
-	v0.writePixel(0, 10, 0x1F00, 0, 0, false, false, 0, clipX, clipY)
+	writePixelTest(v0, 0, 10, 0x1F00, clipX, clipY)
 	if readFBPixel(v0, 0, 5) != 0x1F00 || readDisplayFBPixel(v0, 0, 5) != 0 {
 		t.Errorf("DIE=1 TVM=0 DIL=0: drawFB=0x%04X displayFB=0x%04X, want drawFB row 5 = 0x1F00",
 			readFBPixel(v0, 0, 5), readDisplayFBPixel(v0, 0, 5))
 	}
 
-	// DIL=1: Y=11 (odd) -> displayFB row 5.
+	// DIL=1: Y=11 (odd) -> drawFB row 5.
 	v1, clipX, clipY := dieTestVDP1(true)
-	v1.writePixel(0, 11, 0x1F00, 0, 0, false, false, 0, clipX, clipY)
-	if readDisplayFBPixel(v1, 0, 5) != 0x1F00 || readFBPixel(v1, 0, 5) != 0 {
-		t.Errorf("DIE=1 TVM=0 DIL=1: drawFB=0x%04X displayFB=0x%04X, want displayFB row 5 = 0x1F00",
+	writePixelTest(v1, 0, 11, 0x1F00, clipX, clipY)
+	if readFBPixel(v1, 0, 5) != 0x1F00 || readDisplayFBPixel(v1, 0, 5) != 0 {
+		t.Errorf("DIE=1 TVM=0 DIL=1: drawFB=0x%04X displayFB=0x%04X, want drawFB row 5 = 0x1F00",
 			readFBPixel(v1, 0, 5), readDisplayFBPixel(v1, 0, 5))
 	}
 }
 
 func TestDIECPUFBIORouting(t *testing.T) {
-	// DIE=1 + TVM=0: CPU framebuffer I/O follows the DIL-pinned buffer
-	// (currentDrawFB) - DIL=0 targets drawFB, DIL=1 targets displayFB.
-	// DIL=0: drawFB.
-	v0, _, _ := dieTestVDP1(false)
-	v0.WriteFB(0x0010, 0xAB)
-	if v0.drawFB[0x0010] != 0xAB || v0.displayFB[0x0010] != 0 {
-		t.Errorf("DIE=1 DIL=0 WriteFB: drawFB[0x10]=0x%02X displayFB[0x10]=0x%02X, want drawFB",
-			v0.drawFB[0x0010], v0.displayFB[0x0010])
-	}
-	if got := v0.ReadFB(0x0010); got != 0xAB {
-		t.Errorf("DIE=1 DIL=0 ReadFB(0x10) = 0x%02X, want 0xAB", got)
-	}
-
-	// DIL=1: displayFB.
-	v1, _, _ := dieTestVDP1(true)
-	v1.WriteFB(0x0010, 0xCD)
-	if v1.displayFB[0x0010] != 0xCD || v1.drawFB[0x0010] != 0 {
-		t.Errorf("DIE=1 DIL=1 WriteFB: drawFB[0x10]=0x%02X displayFB[0x10]=0x%02X, want displayFB",
-			v1.drawFB[0x0010], v1.displayFB[0x0010])
-	}
-	if got := v1.ReadFB(0x0010); got != 0xCD {
-		t.Errorf("DIE=1 DIL=1 ReadFB(0x10) = 0x%02X, want 0xCD", got)
-	}
-
-	// 16/32-bit variants honor the same DIL pinning (DIL=1 -> displayFB).
-	v3, _, _ := dieTestVDP1(true)
-	v3.WriteFB16(0x0020, 0xBEEF)
-	v3.WriteFB32(0x0040, 0xDEADBEEF)
-	if v3.displayFB[0x0020] != 0xBE || v3.displayFB[0x0021] != 0xEF {
-		t.Error("DIE=1 DIL=1 WriteFB16 did not target displayFB")
-	}
-	if v3.displayFB[0x0040] != 0xDE || v3.displayFB[0x0043] != 0xEF {
-		t.Error("DIE=1 DIL=1 WriteFB32 did not target displayFB")
-	}
-	if v3.drawFB[0x0020] != 0 || v3.drawFB[0x0040] != 0 {
-		t.Error("DIE=1 DIL=1 WriteFB16/32 leaked into drawFB")
+	// DIE=1 + TVM=0: CPU framebuffer I/O reaches the draw buffer under
+	// either DIL, the side being drawn (manual Sec 4.2).
+	for _, dil := range []bool{false, true} {
+		v, _, _ := dieTestVDP1(dil)
+		v.WriteFB(0x0010, 0xAB)
+		if v.drawFB[0x0010] != 0xAB || v.displayFB[0x0010] != 0 {
+			t.Errorf("DIE=1 DIL=%v WriteFB: drawFB[0x10]=0x%02X displayFB[0x10]=0x%02X, want drawFB",
+				dil, v.drawFB[0x0010], v.displayFB[0x0010])
+		}
+		if got := v.ReadFB(0x0010); got != 0xAB {
+			t.Errorf("DIE=1 DIL=%v ReadFB(0x10) = 0x%02X, want 0xAB", dil, got)
+		}
+		v.WriteFB16(0x0020, 0xBEEF)
+		v.WriteFB32(0x0040, 0xDEADBEEF)
+		if v.drawFB[0x0020] != 0xBE || v.drawFB[0x0021] != 0xEF {
+			t.Errorf("DIE=1 DIL=%v WriteFB16 did not target drawFB", dil)
+		}
+		if v.drawFB[0x0040] != 0xDE || v.drawFB[0x0043] != 0xEF {
+			t.Errorf("DIE=1 DIL=%v WriteFB32 did not target drawFB", dil)
+		}
+		if v.displayFB[0x0020] != 0 || v.displayFB[0x0040] != 0 {
+			t.Errorf("DIE=1 DIL=%v WriteFB16/32 leaked into displayFB", dil)
+		}
 	}
 }
 
-func TestDIEVBlankInNoSwap(t *testing.T) {
-	// Double interlace (DIE=1) pins the buffers instead of swapping;
-	// shown here with an 8bpp (TVM=1) setup.
+func TestDIEVBlankInSwaps(t *testing.T) {
+	// Double interlace (DIE=1) is 1-cycle mode (manual Sec 4.2,
+	// FCM=FCT=0): the buffers swap every field; shown here with an
+	// 8bpp (TVM=1) setup.
 	v := NewVDP1(NewSCU())
 	v.tvmr = 0x0001     // TVM=1
 	v.Write(0x02, 0x08) // DIE=1, DIL=0, FCM=0, FCT=0
 
-	v.drawFB[0] = 0xAB
-	v.displayFB[0] = 0xCD
-
-	// Snapshot slice headers to verify no swap.
 	preDraw := &v.drawFB[0]
 	preDisplay := &v.displayFB[0]
 
 	v.VBlankIn()
 
-	if &v.drawFB[0] != preDraw || &v.displayFB[0] != preDisplay {
-		t.Error("DIE=1 + TVM=1 VBlankIn must not swap drawFB/displayFB roles")
+	if &v.drawFB[0] != preDisplay || &v.displayFB[0] != preDraw {
+		t.Error("DIE=1 + TVM=1 VBlankIn must swap drawFB/displayFB roles")
+	}
+	if !v.fbSwapped {
+		t.Error("DIE=1 VBlankIn did not mark the swap for the PTM=10 gate")
 	}
 }
 
-func TestDIEVBlankInErasesOnlyDilMatchedFB(t *testing.T) {
-	// Under double interlace (DIE=1) erase clears only the DIL-matched
-	// buffer; shown here with an 8bpp (TVM=1) setup.
-	// DIL=0: erase drawFB only; displayFB preserved.
-	v := NewVDP1(NewSCU())
-	v.tvmr = 0x0001     // TVM=1
-	v.Write(0x02, 0x08) // DIE=1 DIL=0 FCM=0 FCT=0
-	v.Write(0x08, 0x0000)
-	v.Write(0x0A, 0x80FF) // 128 H-units * 8 px = 1024 wide (TVM=1 FB)
-	v.Write(0x06, 0x1234)
+func TestDIEVBlankInErasesBufferBroughtIn(t *testing.T) {
+	// Under double interlace the change erases the buffer it brings
+	// in for drawing and preserves the buffer it displays, the
+	// previous field's draw; shown here with an 8bpp (TVM=1) setup
+	// under either DIL.
+	for _, fbcr := range []uint16{0x08, 0x0C} {
+		v := NewVDP1(NewSCU())
+		v.tvmr = 0x0001 // TVM=1
+		v.Write(0x02, fbcr)
+		v.Write(0x08, 0x0000)
+		v.Write(0x0A, 0x80FF) // 128 H-units * 8 px = 1024 wide (TVM=1 FB)
+		v.Write(0x06, 0x1234)
 
-	// Marker in displayFB that must survive.
-	v.displayFB[0x100] = 0x99
+		// The field's draw, displayed after the change.
+		v.drawFB[0x100] = 0x99
 
-	v.VBlankIn()
+		v.VBlankIn()
 
-	// drawFB filled with EWDR (8bpp: bit 15..8 = even-X, 7..0 = odd-X).
-	if v.drawFB[0] != 0x12 || v.drawFB[1] != 0x34 {
-		t.Errorf("DIL=0: drawFB head = 0x%02X%02X, want 0x1234", v.drawFB[0], v.drawFB[1])
-	}
-	// displayFB marker preserved.
-	if v.displayFB[0x100] != 0x99 {
-		t.Errorf("DIL=0: displayFB marker = 0x%02X, want 0x99 (untouched)", v.displayFB[0x100])
-	}
-
-	// DIL=1: erase displayFB only; drawFB preserved.
-	v2 := NewVDP1(NewSCU())
-	v2.tvmr = 0x0001
-	v2.Write(0x02, 0x0C) // DIE=1 DIL=1
-	v2.Write(0x08, 0x0000)
-	v2.Write(0x0A, 0x80FF)
-	v2.Write(0x06, 0x5678)
-	v2.drawFB[0x100] = 0x88
-
-	v2.VBlankIn()
-
-	if v2.displayFB[0] != 0x56 || v2.displayFB[1] != 0x78 {
-		t.Errorf("DIL=1: displayFB head = 0x%02X%02X, want 0x5678",
-			v2.displayFB[0], v2.displayFB[1])
-	}
-	if v2.drawFB[0x100] != 0x88 {
-		t.Errorf("DIL=1: drawFB marker = 0x%02X, want 0x88 (untouched)", v2.drawFB[0x100])
+		// The buffer brought in is filled with EWDR (8bpp: bit 15..8 =
+		// even-X, 7..0 = odd-X).
+		if v.drawFB[0] != 0x12 || v.drawFB[1] != 0x34 {
+			t.Errorf("FBCR %#x: drawFB head = 0x%02X%02X, want 0x1234", fbcr, v.drawFB[0], v.drawFB[1])
+		}
+		if v.displayFB[0x100] != 0x99 {
+			t.Errorf("FBCR %#x: displayFB marker = 0x%02X, want 0x99 (the previous draw)", fbcr, v.displayFB[0x100])
+		}
 	}
 }
 
@@ -5086,14 +5059,14 @@ func TestDIEDoubledYHalvesAndFiltersParity(t *testing.T) {
 	clipX, clipY := v.clipBounds()
 
 	// DIL=0 even-Y plot: Y=10 -> drawFB row 5 col 7.
-	v.writePixel(7, 10, 0x42, 0, 0, false, false, 0, clipX, clipY)
+	writePixelTest(v, 7, 10, 0x42, clipX, clipY)
 	off := 5*v.fbWidth() + 7
 	if v.drawFB[off] != 0x42 {
 		t.Errorf("DIL=0 even-Y: drawFB[row=5,col=7] = 0x%02X, want 0x42", v.drawFB[off])
 	}
 
 	// DIL=0 odd-Y plot rejected.
-	v.writePixel(7, 11, 0x99, 0, 0, false, false, 0, clipX, clipY)
+	writePixelTest(v, 7, 11, 0x99, clipX, clipY)
 	for row := 0; row < 12; row++ {
 		if row == 5 {
 			continue
@@ -5105,26 +5078,26 @@ func TestDIEDoubledYHalvesAndFiltersParity(t *testing.T) {
 }
 
 func TestDIEDoubledYRoutesByParity(t *testing.T) {
-	// TVM=1 + DIE=1 + DIL=1: odd-Y plots go to displayFB row Y/2.
+	// TVM=1 + DIE=1 + DIL=1: odd-Y plots go to drawFB row Y/2.
 	v := NewVDP1(NewSCU())
 	v.tvmr = 0x0001
 	v.Write(0x02, 0x0C) // DIE=1, DIL=1
 	v.latchPending()
 	clipX, clipY := v.clipBounds()
 
-	v.writePixel(7, 11, 0xAA, 0, 0, false, false, 0, clipX, clipY)
+	writePixelTest(v, 7, 11, 0xAA, clipX, clipY)
 	off := 5*v.fbWidth() + 7
-	if v.displayFB[off] != 0xAA {
-		t.Errorf("DIL=1 odd-Y: displayFB[row=5,col=7] = 0x%02X, want 0xAA", v.displayFB[off])
+	if v.drawFB[off] != 0xAA {
+		t.Errorf("DIL=1 odd-Y: drawFB[row=5,col=7] = 0x%02X, want 0xAA", v.drawFB[off])
 	}
-	if v.drawFB[off] != 0 {
-		t.Error("DIL=1 odd-Y plot leaked into drawFB")
+	if v.displayFB[off] != 0 {
+		t.Error("DIL=1 odd-Y plot leaked into displayFB")
 	}
 
 	// Even-Y plot rejected under DIL=1.
-	v.writePixel(7, 10, 0xBB, 0, 0, false, false, 0, clipX, clipY)
-	if v.displayFB[off] != 0xAA {
-		t.Errorf("DIL=1 even-Y: displayFB[row=5,col=7] = 0x%02X, want unchanged 0xAA", v.displayFB[off])
+	writePixelTest(v, 7, 10, 0xBB, clipX, clipY)
+	if v.drawFB[off] != 0xAA {
+		t.Errorf("DIL=1 even-Y: drawFB[row=5,col=7] = 0x%02X, want unchanged 0xAA", v.drawFB[off])
 	}
 }
 
@@ -5286,34 +5259,23 @@ func TestMidCommandYieldPixelOutputMatches(t *testing.T) {
 }
 
 func TestDIEDisplayFBAccessor(t *testing.T) {
+	// DisplayFB is the display buffer in every mode: double interlace
+	// swaps the buffers every field like 1-cycle mode, so the sampled
+	// buffer is the one the last change brought in for display, under
+	// either DIL and either color depth.
 	v := NewVDP1(NewSCU())
 	v.drawFB[0] = 0x11
 	v.displayFB[0] = 0x22
 
-	// DIE=0: both fields return displayFB.
-	v.Write(0x02, 0)
-	v.latchPending()
-	if v.DisplayFB(0)[0] != 0x22 || v.DisplayFB(1)[0] != 0x22 {
-		t.Errorf("DIE=0: DisplayFB(0)[0]=0x%02X DisplayFB(1)[0]=0x%02X, want both 0x22",
-			v.DisplayFB(0)[0], v.DisplayFB(1)[0])
-	}
-
-	// DIE=1 + TVM=0: field-based pinning is active regardless of color
-	// depth - field=0 (even) -> drawFB, field=1 (odd) -> displayFB.
-	v.Write(0x02, 0x08)
-	v.latchPending()
-	if v.DisplayFB(0)[0] != 0x11 {
-		t.Errorf("DIE=1 TVM=0 field=0: DisplayFB[0]=0x%02X, want 0x11 (drawFB)", v.DisplayFB(0)[0])
-	}
-	if v.DisplayFB(1)[0] != 0x22 {
-		t.Errorf("DIE=1 TVM=0 field=1: DisplayFB[0]=0x%02X, want 0x22 (displayFB)", v.DisplayFB(1)[0])
-	}
-
-	// DIE=1 + TVM=1 (8bpp) pins identically; color depth is irrelevant.
-	v.tvmr = 0x0001
-	if v.DisplayFB(0)[0] != 0x11 || v.DisplayFB(1)[0] != 0x22 {
-		t.Errorf("DIE=1 TVM=1: DisplayFB(0)[0]=0x%02X DisplayFB(1)[0]=0x%02X, want 0x11/0x22",
-			v.DisplayFB(0)[0], v.DisplayFB(1)[0])
+	for _, fbcr := range []uint16{0x00, 0x08, 0x0C} {
+		for _, tvmr := range []uint16{0x0000, 0x0001} {
+			v.Write(0x02, fbcr)
+			v.latchPending()
+			v.tvmr = tvmr
+			if v.DisplayFB()[0] != 0x22 {
+				t.Errorf("FBCR %#x TVMR %#x: DisplayFB()[0]=0x%02X, want 0x22 (displayFB)", fbcr, tvmr, v.DisplayFB()[0])
+			}
+		}
 	}
 }
 
@@ -5863,4 +5825,41 @@ func TestInvalidColorModeDrawsNothing(t *testing.T) {
 			}
 		}
 	}
+}
+
+// writePixelTest writes one replace-mode pixel through the render
+// pixel write with the VDP1's current clip and frame buffer state.
+func writePixelTest(v *VDP1, x, y int, pixel uint16, clipX, clipY int) {
+	pp := v.pixelParams(0, false, false, 0, clipX, clipY)
+	draw.PutDot(compute.VDP1FB(v.drawFB), nil, &pp, int32(x), int32(y), uint32(pixel), 0, 0)
+}
+
+// initDDAEdge starts a side-edge walk from (x1,y1) to (x2,y2) over
+// steps steps (draw.NewDDAEdge).
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func intMax(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// preClipReject reports whether a bounding box lies entirely outside
+// the system clip region (0,0)-(clipX,clipY) (draw.PreClipReject).
+func preClipReject(minX, minY, maxX, maxY, clipX, clipY int) bool {
+	return draw.PreClipReject(int32(minX), int32(minY), int32(maxX), int32(maxY), int32(clipX), int32(clipY))
+}
+
+// clipSteps intersects the connecting line (x0,y0)-(x1,y1) with the
+// drawing area and returns the visible dot range's entry and exit
+// floors over lineLen steps (draw.ClipSteps).
+func clipSteps(x0, y0, x1, y1, clipX, clipY, lineLen int) (j0, j1 int, ok bool) {
+	a, b, ok := draw.ClipSteps(int32(x0), int32(y0), int32(x1), int32(y1), int32(clipX), int32(clipY), int32(lineLen))
+	return int(a), int(b), ok
 }

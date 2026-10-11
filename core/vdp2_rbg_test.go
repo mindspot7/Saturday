@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"github.com/user-none/erings/core/compute/screen"
+	"testing"
+)
 
 // rbgTestRed, rbgTestGreen, rbgTestBlue are the 4bpp dot values used by
 // the parameter A/B fixtures below. Palette 1 maps them to CRAM entries
@@ -109,7 +112,7 @@ func expectRGB(t *testing.T, v *VDP2, buf []uint32, x, y int, r, g, b uint8, wha
 		t.Errorf("%s: pixel(%d,%d) transparent, want (%d,%d,%d)", what, x, y, r, g, b)
 		return
 	}
-	gr, gg, gb := uint8(px>>16), uint8(px>>8), uint8(px)
+	gr, gg, gb := uint8(screen.ColorR(px)), uint8(screen.ColorG(px)), uint8(screen.ColorB(px))
 	if gr != r || gg != g || gb != b {
 		t.Errorf("%s: pixel(%d,%d) = (%d,%d,%d), want (%d,%d,%d)", what, x, y, gr, gg, gb, r, g, b)
 	}
@@ -129,37 +132,37 @@ func expectTransparent(t *testing.T, v *VDP2, buf []uint32, x, y int, what strin
 // B's own start coordinate and map registers, in cell mode.
 func TestRBG0RPMD1ParamBOnlyCell(t *testing.T) {
 	v := setupRBG0ParamAB(t)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v.regs[vdp2RPMD] = 0x0000
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RPMD=0 parameter A")
-	expectRGB(t, v, buf, 15, 3, 255, 0, 0, "RPMD=0 parameter A")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "RPMD=0 parameter A")
+	expectRGB(t, v, buf, 15, 3, 248, 0, 0, "RPMD=0 parameter A")
 
 	v.regs[vdp2RPMD] = 0x0001
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 255, 0, "RPMD=1 parameter B")
-	expectRGB(t, v, buf, 15, 3, 0, 255, 0, "RPMD=1 parameter B")
-	expectRGB(t, v, buf, 31, 7, 0, 255, 0, "RPMD=1 parameter B")
+	expectRGB(t, v, buf, 0, 0, 0, 248, 0, "RPMD=1 parameter B")
+	expectRGB(t, v, buf, 15, 3, 0, 248, 0, "RPMD=1 parameter B")
+	expectRGB(t, v, buf, 31, 7, 0, 248, 0, "RPMD=1 parameter B")
 }
 
 // TestRBG0RPMD1ParamBOnlyBitmap is the bitmap-mode counterpart of
 // TestRBG0RPMD1ParamBOnlyCell.
 func TestRBG0RPMD1ParamBOnlyBitmap(t *testing.T) {
 	v := setupRBG0BitmapParamAB(t)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v.regs[vdp2RPMD] = 0x0000
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RPMD=0 parameter A")
-	expectRGB(t, v, buf, 15, 0, 255, 0, 0, "RPMD=0 parameter A")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "RPMD=0 parameter A")
+	expectRGB(t, v, buf, 15, 0, 248, 0, 0, "RPMD=0 parameter A")
 
 	v.regs[vdp2RPMD] = 0x0001
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 255, 0, "RPMD=1 parameter B")
-	expectRGB(t, v, buf, 31, 0, 0, 255, 0, "RPMD=1 parameter B")
+	expectRGB(t, v, buf, 0, 0, 0, 248, 0, "RPMD=1 parameter B")
+	expectRGB(t, v, buf, 31, 0, 0, 248, 0, "RPMD=1 parameter B")
 }
 
 // TestRBG0RPMD1ParamBPlaneSize verifies that under RPMD mode 1 the map
@@ -176,15 +179,15 @@ func TestRBG0RPMD1ParamBPlaneSize(t *testing.T) {
 	writeVRAM16(v, 0x4000, 0x0001)
 	writeVRAM16(v, 0x4002, 0x402)
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	v.regs[vdp2PLSZ] = 0x0000 // B plane 1x1
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RPMD=1 B plane 1x1: cell 64 is plane B page 0")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "RPMD=1 B plane 1x1: cell 64 is plane B page 0")
 
 	v.regs[vdp2PLSZ] = 0x1000 // B plane 2x1, A plane 1x1
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "RPMD=1 B plane 2x1: cell 64 is plane A page 1")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "RPMD=1 B plane 2x1: cell 64 is plane A page 1")
 }
 
 // TestRBG0BitmapParamBMapOffset verifies a bitmap RBG0 dot rendered
@@ -202,18 +205,18 @@ func TestRBG0BitmapParamBMapOffset(t *testing.T) {
 		v.cram[14], v.cram[15] = 0x7C, 0x00
 		return v
 	}
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v := setup()
 	v.regs[vdp2RPMD] = 0x0001
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "RPMD=1 reads the parameter B bitmap")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "RPMD=1 reads the parameter B bitmap")
 
 	v = setup()
 	v.regs[vdp2RPMD] = 0x0000
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RPMD=0 reads the parameter A bitmap")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "RPMD=0 reads the parameter A bitmap")
 
 	v = setup()
 	v.regs[vdp2RPMD] = 0x0003
@@ -222,8 +225,8 @@ func TestRBG0BitmapParamBMapOffset(t *testing.T) {
 	v.regs[vdp2WPSY0], v.regs[vdp2WPEY0] = 0, 7
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 3, 0, 0, 0, 255, "RPMD=3 inside W0: parameter B bitmap")
-	expectRGB(t, v, buf, 12, 0, 255, 0, 0, "RPMD=3 outside W0: parameter A bitmap")
+	expectRGB(t, v, buf, 3, 0, 0, 0, 248, "RPMD=3 inside W0: parameter B bitmap")
+	expectRGB(t, v, buf, 12, 0, 248, 0, 0, "RPMD=3 outside W0: parameter A bitmap")
 }
 
 // fill32 writes count consecutive 32-bit dots (two big-endian words) at
@@ -257,7 +260,7 @@ func TestRBGCell2x2ColorMode16M(t *testing.T) {
 			fill32(v, 0x8200, 64, 0x80FF, 0x0000) // bottom-left: blue
 			writeVRAM16(v, 0, 0x0000)
 			writeVRAM16(v, 2, 0x0400)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			tc.render(v, buf)
 			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "top-left sub-cell")
 			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "top-right sub-cell")
@@ -282,18 +285,18 @@ func TestRBG0RPMD3WindowSelectsParamCell(t *testing.T) {
 
 	// RPW0E, area = inside.
 	v.regs[vdp2WCTLD] = 0x0002
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 3, 2, 0, 255, 0, "RPMD=3 inside W0 -> parameter B")
-	expectRGB(t, v, buf, 12, 2, 255, 0, 0, "RPMD=3 outside W0 -> parameter A")
-	expectRGB(t, v, buf, 3, 5, 255, 0, 0, "RPMD=3 below W0 -> parameter A")
+	expectRGB(t, v, buf, 3, 2, 0, 248, 0, "RPMD=3 inside W0 -> parameter B")
+	expectRGB(t, v, buf, 12, 2, 248, 0, 0, "RPMD=3 outside W0 -> parameter A")
+	expectRGB(t, v, buf, 3, 5, 248, 0, 0, "RPMD=3 below W0 -> parameter A")
 
 	// RPW0E, area = outside.
 	v.regs[vdp2WCTLD] = 0x0003
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 3, 2, 255, 0, 0, "RPMD=3 inverted, inside W0 -> parameter A")
-	expectRGB(t, v, buf, 12, 2, 0, 255, 0, "RPMD=3 inverted, outside W0 -> parameter B")
+	expectRGB(t, v, buf, 3, 2, 248, 0, 0, "RPMD=3 inverted, inside W0 -> parameter A")
+	expectRGB(t, v, buf, 12, 2, 0, 248, 0, "RPMD=3 inverted, outside W0 -> parameter B")
 }
 
 // TestRBG0RPMD3WindowSelectsParamBitmap is the bitmap-mode counterpart of
@@ -307,16 +310,16 @@ func TestRBG0RPMD3WindowSelectsParamBitmap(t *testing.T) {
 	v.regs[vdp2WPEY0] = 7
 
 	v.regs[vdp2WCTLD] = 0x0002
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 3, 0, 0, 255, 0, "RPMD=3 inside W0 -> parameter B")
-	expectRGB(t, v, buf, 12, 0, 255, 0, 0, "RPMD=3 outside W0 -> parameter A")
+	expectRGB(t, v, buf, 3, 0, 0, 248, 0, "RPMD=3 inside W0 -> parameter B")
+	expectRGB(t, v, buf, 12, 0, 248, 0, 0, "RPMD=3 outside W0 -> parameter A")
 
 	v.regs[vdp2WCTLD] = 0x0003
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 3, 0, 255, 0, 0, "RPMD=3 inverted, inside W0 -> parameter A")
-	expectRGB(t, v, buf, 12, 0, 0, 255, 0, "RPMD=3 inverted, outside W0 -> parameter B")
+	expectRGB(t, v, buf, 3, 0, 248, 0, 0, "RPMD=3 inverted, inside W0 -> parameter A")
+	expectRGB(t, v, buf, 12, 0, 0, 248, 0, "RPMD=3 inverted, outside W0 -> parameter B")
 }
 
 // TestRBG0RPMD2PerDotSwitchCell verifies the RPMD mode 2 switch is
@@ -355,12 +358,12 @@ func TestRBG0RPMD2PerDotSwitchCell(t *testing.T) {
 		writeVRAM16(v, 0x18002+dot*4, 0x0000)
 	}
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RPMD=2 dot 0 stays on A")
-	expectRGB(t, v, buf, 3, 0, 255, 0, 0, "RPMD=2 dot 3 stays on A")
-	expectRGB(t, v, buf, 4, 0, 0, 255, 0, "RPMD=2 dot 4 switched to B")
-	expectRGB(t, v, buf, 7, 0, 0, 255, 0, "RPMD=2 dot 7 switched to B")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "RPMD=2 dot 0 stays on A")
+	expectRGB(t, v, buf, 3, 0, 248, 0, 0, "RPMD=2 dot 3 stays on A")
+	expectRGB(t, v, buf, 4, 0, 0, 248, 0, "RPMD=2 dot 4 switched to B")
+	expectRGB(t, v, buf, 7, 0, 0, 248, 0, "RPMD=2 dot 7 switched to B")
 }
 
 // TestRBG0RPRCTLReReadRendering verifies the per-line RPRCTL re-read arms
@@ -379,11 +382,11 @@ func TestRBG0RPRCTLReReadRendering(t *testing.T) {
 		want []uint8
 	}
 	cases := []field{
-		{"A Xst", false, 0x0001, 0x00, 16, []uint8{0, 255, 0}},
-		{"A Yst", false, 0x0002, 0x04, 8, []uint8{0, 0, 255}},
+		{"A Xst", false, 0x0001, 0x00, 16, []uint8{0, 248, 0}},
+		{"A Yst", false, 0x0002, 0x04, 8, []uint8{0, 0, 248}},
 		{"A KAst", false, 0x0004, 0x54, 0x6080, nil},
-		{"B Xst", true, 0x0100, 0x00, 16, []uint8{0, 255, 0}},
-		{"B Yst", true, 0x0200, 0x04, 8, []uint8{0, 0, 255}},
+		{"B Xst", true, 0x0100, 0x00, 16, []uint8{0, 248, 0}},
+		{"B Yst", true, 0x0200, 0x04, 8, []uint8{0, 0, 248}},
 		{"B KAst", true, 0x0400, 0x54, 0x6080, nil},
 	}
 	for _, tc := range cases {
@@ -413,7 +416,7 @@ func TestRBG0RPRCTLReReadRendering(t *testing.T) {
 				writeVRAM16(v, 0x18202, 0x0000)
 			}
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			v.BeginFrame()
 			v.decodeLineState()
 			if !v.frame.rbg0On {
@@ -425,10 +428,11 @@ func TestRBG0RPRCTLReReadRendering(t *testing.T) {
 				if y == 3 {
 					writeRotParam32(v, base, tc.offset, tc.newHi, 0x0000)
 				}
-				v.rbg0SpanSetup(buf, &v.frame.rbg0, &v.frame.rbg0F, y)(0, v.frame.width)
+				v.rbg0SpanSetup(&v.frame.rbg0, &v.frame.rbg0F, y)
+				rbgSpanTest(v, buf, nil, &v.rowRecord(y).RBG[0], 0, v.frame.width)
 			}
 
-			expectRGB(t, v, buf, 0, 4, 255, 0, 0, "line 4 before the armed line keeps the frame-start value")
+			expectRGB(t, v, buf, 0, 4, 248, 0, 0, "line 4 before the armed line keeps the frame-start value")
 			if tc.want == nil {
 				expectTransparent(t, v, buf, 0, 5, "armed line re-reads")
 				expectTransparent(t, v, buf, 0, 6, "line after the armed line keeps the re-read")
@@ -443,6 +447,12 @@ func TestRBG0RPRCTLReReadRendering(t *testing.T) {
 // renderTestRBG1 drives the production per-line path to render a full
 // frame of RBG1 into buf.
 func renderTestRBG1(v *VDP2, buf []uint32) {
+	renderTestRBG1LineColor(v, buf, nil)
+}
+
+// renderTestRBG1LineColor renders a full frame of RBG1 into buf and
+// its coefficient line colors into lc.
+func renderTestRBG1LineColor(v *VDP2, buf []uint32, lc []uint8) {
 	v.BeginFrame()
 	v.decodeLineState()
 	if !v.frame.rbg1On {
@@ -450,7 +460,8 @@ func renderTestRBG1(v *VDP2, buf []uint32) {
 		return
 	}
 	for y := 0; y < v.frame.height; y++ {
-		v.rbg1SpanSetup(buf, &v.frame.rbg1, &v.frame.rbg1F, y)(0, v.frame.width)
+		v.rbg1SpanSetup(&v.frame.rbg1, &v.frame.rbg1F, y)
+		rbgSpanTest(v, buf, lc, &v.rowRecord(y).RBG[1], 0, v.frame.width)
 	}
 }
 
@@ -580,25 +591,25 @@ func TestRBGScreenOverPatternCell(t *testing.T) {
 			v.regs[tc.pnc] = 0x0001
 			v.regs[tc.ovpn] = 0x1003
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			tc.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 0, 255, "over pattern dot (0,0)")
-			expectRGB(t, v, buf, 5, 0, 0, 255, 0, "over pattern dot (5,0)")
-			expectRGB(t, v, buf, 0, 5, 255, 0, 0, "over pattern dot (0,5)")
-			expectRGB(t, v, buf, 8, 0, 255, 0, 0, "in-plane cell 0")
-			expectRGB(t, v, buf, 8, 5, 255, 0, 0, "in-plane cell 0 row 5")
+			expectRGB(t, v, buf, 0, 0, 0, 0, 248, "over pattern dot (0,0)")
+			expectRGB(t, v, buf, 5, 0, 0, 248, 0, "over pattern dot (5,0)")
+			expectRGB(t, v, buf, 0, 5, 248, 0, 0, "over pattern dot (0,5)")
+			expectRGB(t, v, buf, 8, 0, 248, 0, 0, "in-plane cell 0")
+			expectRGB(t, v, buf, 8, 5, 248, 0, 0, "in-plane cell 0 row 5")
 
 			v.regs[tc.ovpn] = 0x1003 | 0x0400 // hflip
 			clear(buf)
 			tc.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "over pattern hflip dot (0,0)")
-			expectRGB(t, v, buf, 5, 0, 0, 0, 255, "over pattern hflip dot (5,0)")
+			expectRGB(t, v, buf, 0, 0, 0, 248, 0, "over pattern hflip dot (0,0)")
+			expectRGB(t, v, buf, 5, 0, 0, 0, 248, "over pattern hflip dot (5,0)")
 
 			v.regs[tc.ovpn] = 0x1003 | 0x0800 // vflip
 			clear(buf)
 			tc.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "over pattern vflip dot (0,0)")
-			expectRGB(t, v, buf, 0, 5, 0, 0, 255, "over pattern vflip dot (0,5)")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "over pattern vflip dot (0,0)")
+			expectRGB(t, v, buf, 0, 5, 0, 0, 248, "over pattern vflip dot (0,5)")
 		})
 	}
 }
@@ -626,7 +637,7 @@ func TestRBGScreenOverPatternSpecialBits(t *testing.T) {
 				v.regs[vdp2SFCCMD] = 0x0101
 				// Screen CC enable for RBG0 (bit 4) and NBG0/RBG1 (bit 0).
 				v.regs[vdp2CCCTL] = 0x0011
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				tc.render(v, buf)
 				if buf[0] == 0 {
 					t.Fatalf("over pattern dot (0,0) transparent with PNC bits 0x%04X", pncBits)
@@ -664,12 +675,80 @@ func TestRBGScreenOverTransparentAndForce512(t *testing.T) {
 				v := tc.setup(t)
 				v.regs[vdp2PLSZ] = mode << tc.plszSh
 				writeRotParam32(v, tc.xstBase, 0x00, rbgXstNeg8, 0x0000)
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				tc.render(v, buf)
 				expectTransparent(t, v, buf, 0, 0, "over mode "+string(rune('0'+mode))+" negative map X")
 				expectTransparent(t, v, buf, 7, 3, "over mode "+string(rune('0'+mode))+" negative map X")
-				expectRGB(t, v, buf, 8, 0, 255, 0, 0, "over mode "+string(rune('0'+mode))+" in-plane")
+				expectRGB(t, v, buf, 8, 0, 248, 0, 0, "over mode "+string(rune('0'+mode))+" in-plane")
 			})
+		}
+	}
+}
+
+// TestRBGScreenOverForce512Area verifies screen-over mode 3 (Plane Size
+// Register RxOVR=11) sets the display area to 0 <= X < 512, 0 <= Y <
+// 512 regardless of the plane size: a map coordinate inside the area
+// renders from the map, and one at or past 512 on either axis is
+// transparent even though the map, 2048 dots on each axis, holds a
+// cell there (the fixture's planes all name page 0, so map X 512 is
+// cell 0 again). Mode 0 renders that cell.
+func TestRBGScreenOverForce512Area(t *testing.T) {
+	for _, tc := range rbgScreenOverCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			v := tc.setup(t)
+			v.regs[vdp2PLSZ] = 3 << tc.plszSh
+			writeRBGTestCell(v, 63, 0, 0x402)
+			// Xst 504: dots 0-7 map to X 504-511, dot 8 to X 512.
+			writeRotParam32(v, tc.xstBase, 0x00, 0x01F8, 0x0000)
+			buf := make([]uint32, testFrameDots)
+			tc.render(v, buf)
+			expectRGB(t, v, buf, 7, 0, 0, 0, 248, "mode 3 map X 511 inside the area")
+			expectTransparent(t, v, buf, 8, 0, "mode 3 map X 512 past the area")
+			expectTransparent(t, v, buf, 15, 0, "mode 3 map X 519 past the area")
+
+			v.regs[vdp2PLSZ] = 0
+			clear(buf)
+			tc.render(v, buf)
+			expectRGB(t, v, buf, 8, 0, 248, 0, 0, "mode 0 map X 512 wraps to cell 0")
+
+			// Yst 512: row 0 maps to Y 512.
+			v.regs[vdp2PLSZ] = 3 << tc.plszSh
+			writeRotParam32(v, tc.xstBase, 0x00, 0x0000, 0x0000)
+			writeRotParam32(v, tc.xstBase, 0x04, 0x0200, 0x0000)
+			clear(buf)
+			tc.render(v, buf)
+			expectTransparent(t, v, buf, 0, 0, "mode 3 map Y 512 past the area")
+		})
+	}
+}
+
+// TestRBG0BitmapScreenOverForce512Area verifies screen-over mode 3 on a
+// 512x256 bitmap: the display area is 0 <= X < 512, 0 <= Y < 512
+// regardless of the bitmap size, with the bitmap repeated to fill it
+// (Plane Size Register note: a 256-dot bitmap shows two images), and
+// transparent past it. Mode 2 leaves the dot past the bitmap
+// transparent.
+func TestRBG0BitmapScreenOverForce512Area(t *testing.T) {
+	buf := make([]uint32, testFrameDots)
+	for _, c := range []struct {
+		mode uint16
+		yst  uint16
+		red  bool
+		what string
+	}{
+		{3, 0x0100, true, "mode 3 map Y 256 repeats bitmap row 0"},
+		{3, 0x0200, false, "mode 3 map Y 512 past the area"},
+		{2, 0x0100, false, "mode 2 map Y 256 past the bitmap"},
+	} {
+		v := setupRBG0BitmapParamAB(t)
+		v.regs[vdp2PLSZ] = c.mode << 10
+		writeRotParam32(v, 0x10000, 0x04, c.yst, 0x0000)
+		clear(buf)
+		renderTestRBG0(v, buf)
+		if c.red {
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, c.what)
+		} else {
+			expectTransparent(t, v, buf, 0, 0, c.what)
 		}
 	}
 }
@@ -683,10 +762,10 @@ func TestRBG0BitmapScreenOverNonWrap(t *testing.T) {
 		v := setupRBG0BitmapParamAB(t)
 		v.regs[vdp2PLSZ] = mode << 10
 		writeRotParam32(v, 0x10000, 0x00, rbgXstNeg8, 0x0000)
-		buf := make([]uint32, 352*256)
+		buf := make([]uint32, testFrameDots)
 		renderTestRBG0(v, buf)
 		expectTransparent(t, v, buf, 0, 0, "parameter A bitmap over mode "+string(rune('0'+mode)))
-		expectRGB(t, v, buf, 8, 0, 255, 0, 0, "parameter A bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
+		expectRGB(t, v, buf, 8, 0, 248, 0, 0, "parameter A bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
 
 		v = setupRBG0BitmapParamAB(t)
 		v.regs[vdp2RPMD] = 0x0001
@@ -695,7 +774,7 @@ func TestRBG0BitmapScreenOverNonWrap(t *testing.T) {
 		clear(buf)
 		renderTestRBG0(v, buf)
 		expectTransparent(t, v, buf, 0, 0, "parameter B bitmap over mode "+string(rune('0'+mode)))
-		expectRGB(t, v, buf, 8, 0, 255, 0, 0, "parameter B bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
+		expectRGB(t, v, buf, 8, 0, 248, 0, 0, "parameter B bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
 	}
 }
 
@@ -703,7 +782,7 @@ func TestRBG0BitmapScreenOverNonWrap(t *testing.T) {
 // the configured bitmap width (512 or 1024), and the non-wrap modes leave
 // the out-of-bitmap dot transparent.
 func TestRBG1BitmapScreenOver(t *testing.T) {
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	// Wrap at 512: map X -8 reads bitmap dot 504.
 	v := setupRBG1BitmapScene(t)
@@ -711,8 +790,8 @@ func TestRBG1BitmapScreenOver(t *testing.T) {
 	v.vram[504] = 7
 	v.vram[1016] = 5
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "512-wide wrap reads dot 504")
-	expectRGB(t, v, buf, 8, 0, 255, 0, 0, "in-bitmap dot 0")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "512-wide wrap reads dot 504")
+	expectRGB(t, v, buf, 8, 0, 248, 0, 0, "in-bitmap dot 0")
 
 	// Wrap at 1024: map X -8 reads bitmap dot 1016.
 	v = setupRBG1BitmapScene(t)
@@ -722,7 +801,7 @@ func TestRBG1BitmapScreenOver(t *testing.T) {
 	v.vram[1016] = 7
 	clear(buf)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "1024-wide wrap reads dot 1016")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "1024-wide wrap reads dot 1016")
 
 	for _, mode := range []uint16{1, 2, 3} {
 		v = setupRBG1BitmapScene(t)
@@ -731,8 +810,19 @@ func TestRBG1BitmapScreenOver(t *testing.T) {
 		clear(buf)
 		renderTestRBG1(v, buf)
 		expectTransparent(t, v, buf, 0, 0, "RBG1 bitmap over mode "+string(rune('0'+mode)))
-		expectRGB(t, v, buf, 8, 0, 255, 0, 0, "RBG1 bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
+		expectRGB(t, v, buf, 8, 0, 248, 0, 0, "RBG1 bitmap over mode "+string(rune('0'+mode))+" in-bitmap")
 	}
+}
+
+// rbgOpaqueRed returns the 8-bit red channel of the full-red opaque dot
+// the color mode tests write: the 16,770,000-color format (chcn 4)
+// carries 8 bits per channel, the others resolve through a 15-bit color
+// that gains 0 in its lowest 3 bits.
+func rbgOpaqueRed(chcn uint16) uint8 {
+	if chcn == 4 {
+		return 255
+	}
+	return 248
 }
 
 // fillVRAM16 writes count consecutive big-endian words starting at addr.
@@ -760,15 +850,15 @@ func TestRBG0CellColorModes(t *testing.T) {
 				v.vram[0x8000+i] = 5
 				v.vram[0x8100+i] = 0
 			}
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"2048-color", 2, func(v *VDP2) {
 			fillVRAM16(v, 0x8000, 64, 0x0005)
 			fillVRAM16(v, 0x8100, 64, 0x0000)
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"32768-color", 3, func(v *VDP2) {
 			fillVRAM16(v, 0x8000, 64, 0x801F)
 			fillVRAM16(v, 0x8100, 64, 0x001F)
-		}, [3]uint8{255, 0, 0}},
+		}, [3]uint8{248, 0, 0}},
 		{"16770000-color", 4, func(v *VDP2) {
 			fill32(v, 0x8000, 64, 0x8000, 0x00FF)
 			fill32(v, 0x8100, 64, 0x0000, 0x00FF)
@@ -788,10 +878,11 @@ func TestRBG0CellColorModes(t *testing.T) {
 			v.cram[0], v.cram[1] = 0x03, 0xE0   // entry 0: green
 			v.cram[10], v.cram[11] = 0x00, 0x1F // entry 5: red
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, m.name+" opaque dot")
-			expectRGB(t, v, buf, 7, 7, 255, 0, 0, m.name+" opaque dot")
+			red := rbgOpaqueRed(m.chcn)
+			expectRGB(t, v, buf, 0, 0, red, 0, 0, m.name+" opaque dot")
+			expectRGB(t, v, buf, 7, 7, red, 0, 0, m.name+" opaque dot")
 			expectTransparent(t, v, buf, 8, 0, m.name+" transparent dot")
 
 			v.regs[vdp2BGON] |= 1 << 12 // R0TPON
@@ -811,10 +902,10 @@ func TestRBG0CellFlips1x1(t *testing.T) {
 		// colors at (0,0), (5,0), (0,5)
 		c00, c50, c05 [3]uint8
 	}{
-		{"none", 0x0001, [3]uint8{0, 0, 255}, [3]uint8{0, 255, 0}, [3]uint8{255, 0, 0}},
-		{"hflip", 0x4001, [3]uint8{0, 255, 0}, [3]uint8{0, 0, 255}, [3]uint8{255, 0, 0}},
-		{"vflip", 0x8001, [3]uint8{255, 0, 0}, [3]uint8{255, 0, 0}, [3]uint8{0, 0, 255}},
-		{"both", 0xC001, [3]uint8{255, 0, 0}, [3]uint8{255, 0, 0}, [3]uint8{0, 255, 0}},
+		{"none", 0x0001, [3]uint8{0, 0, 248}, [3]uint8{0, 248, 0}, [3]uint8{248, 0, 0}},
+		{"hflip", 0x4001, [3]uint8{0, 248, 0}, [3]uint8{0, 0, 248}, [3]uint8{248, 0, 0}},
+		{"vflip", 0x8001, [3]uint8{248, 0, 0}, [3]uint8{248, 0, 0}, [3]uint8{0, 0, 248}},
+		{"both", 0xC001, [3]uint8{248, 0, 0}, [3]uint8{248, 0, 0}, [3]uint8{0, 248, 0}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -823,7 +914,7 @@ func TestRBG0CellFlips1x1(t *testing.T) {
 			writeRBGTestPalette(v)
 			writeVRAM16(v, 0, tc.msw)
 			writeVRAM16(v, 2, 0x0403)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG0(v, buf)
 			expectRGB(t, v, buf, 0, 0, tc.c00[0], tc.c00[1], tc.c00[2], tc.name)
 			expectRGB(t, v, buf, 5, 0, tc.c50[0], tc.c50[1], tc.c50[2], tc.name)
@@ -837,10 +928,10 @@ func TestRBG0CellFlips1x1(t *testing.T) {
 // top-right, bottom-left, bottom-right, and the flip bits mirror the
 // whole 16x16 character.
 func TestRBG0Cell2x2Flips(t *testing.T) {
-	red := [3]uint8{255, 0, 0}
-	green := [3]uint8{0, 255, 0}
-	blue := [3]uint8{0, 0, 255}
-	white := [3]uint8{255, 255, 255}
+	red := [3]uint8{248, 0, 0}
+	green := [3]uint8{0, 248, 0}
+	blue := [3]uint8{0, 0, 248}
+	white := [3]uint8{248, 248, 248}
 	cases := []struct {
 		name string
 		msw  uint16
@@ -865,7 +956,7 @@ func TestRBG0Cell2x2Flips(t *testing.T) {
 			// 32x32-cell page: entry (0,0) at 0.
 			writeVRAM16(v, 0, tc.msw)
 			writeVRAM16(v, 2, 0x0400)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG0(v, buf)
 			expectRGB(t, v, buf, 0, 0, tc.tl[0], tc.tl[1], tc.tl[2], tc.name+" top-left")
 			expectRGB(t, v, buf, 8, 0, tc.tr[0], tc.tr[1], tc.tr[2], tc.name+" top-right")
@@ -888,15 +979,15 @@ func TestRBG0BitmapColorModes(t *testing.T) {
 	modes := []mode{
 		{"16-color", 0, func(v *VDP2) {
 			v.vram[0] = 0x50
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"2048-color", 2, func(v *VDP2) {
 			writeVRAM16(v, 0, 0x0005)
 			writeVRAM16(v, 2, 0x0000)
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"32768-color", 3, func(v *VDP2) {
 			writeVRAM16(v, 0, 0x801F)
 			writeVRAM16(v, 2, 0x001F)
-		}, [3]uint8{255, 0, 0}},
+		}, [3]uint8{248, 0, 0}},
 		{"16770000-color", 4, func(v *VDP2) {
 			fill32(v, 0, 1, 0x8000, 0x00FF)
 			fill32(v, 4, 1, 0x0000, 0x00FF)
@@ -909,9 +1000,9 @@ func TestRBG0BitmapColorModes(t *testing.T) {
 			m.fill(v)
 			v.cram[0], v.cram[1] = 0x03, 0xE0 // entry 0: green
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, m.name+" opaque dot")
+			expectRGB(t, v, buf, 0, 0, rbgOpaqueRed(m.chcn), 0, 0, m.name+" opaque dot")
 			expectTransparent(t, v, buf, 1, 0, m.name+" transparent dot")
 
 			v.regs[vdp2BGON] |= 1 << 12
@@ -933,15 +1024,15 @@ func TestRBG0BitmapHeight512Wrap(t *testing.T) {
 	v.cram[12], v.cram[13] = 0x03, 0xE0 // index 6: green
 	v.cram[14], v.cram[15] = 0x7C, 0x00 // index 7: blue
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	v.regs[vdp2CHCTLB] = 0x1200 // 512x256
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 255, 0, "256-row bitmap wraps to row 248")
+	expectRGB(t, v, buf, 0, 0, 0, 248, 0, "256-row bitmap wraps to row 248")
 
 	v.regs[vdp2CHCTLB] = 0x1600 // 512x512
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "512-row bitmap wraps to row 504")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "512-row bitmap wraps to row 504")
 }
 
 // TestRBG1BitmapIdentity verifies RBG1 in bitmap format renders through
@@ -949,10 +1040,10 @@ func TestRBG0BitmapHeight512Wrap(t *testing.T) {
 // with the priority from PRINA.
 func TestRBG1BitmapIdentity(t *testing.T) {
 	v := setupRBG1BitmapScene(t)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "bitmap dot 0")
-	expectRGB(t, v, buf, 16, 0, 0, 255, 0, "bitmap dot 16")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "bitmap dot 0")
+	expectRGB(t, v, buf, 16, 0, 0, 248, 0, "bitmap dot 16")
 	expectTransparent(t, v, buf, 48, 0, "bitmap dot 48 (index 0)")
 	if pri := (buf[0] >> 24) & 0x07; pri != 3 {
 		t.Errorf("priority %d, want 3 (PRINA)", pri)
@@ -962,7 +1053,7 @@ func TestRBG1BitmapIdentity(t *testing.T) {
 	writeRBGParamBIdentity(v, 16)
 	clear(buf)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 255, 0, "Xst_B = 16")
+	expectRGB(t, v, buf, 0, 0, 0, 248, 0, "Xst_B = 16")
 }
 
 // TestRBG1BitmapSizes verifies the four RBG1 bitmap sizes taken from
@@ -990,10 +1081,10 @@ func TestRBG1BitmapSizes(t *testing.T) {
 			// row and column for this size.
 			writeRotParam32(v, 0x10080, 0x00, 0x1FFF, 0x0000)
 			writeRotParam32(v, 0x10080, 0x04, 0x1FFF, 0x0000)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG1(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 0, 255, tc.name+" last dot")
-			expectRGB(t, v, buf, 1, 1, 255, 0, 0, tc.name+" dot (0,0)")
+			expectRGB(t, v, buf, 0, 0, 0, 0, 248, tc.name+" last dot")
+			expectRGB(t, v, buf, 1, 1, 248, 0, 0, tc.name+" dot (0,0)")
 		})
 	}
 }
@@ -1006,9 +1097,9 @@ func TestRBG1BitmapBMPNA(t *testing.T) {
 	v := setupRBG1BitmapScene(t)
 	v.regs[vdp2BMPNA] = 0x0001                          // palette bank 1
 	v.cram[(256+5)*2], v.cram[(256+5)*2+1] = 0x7C, 0x00 // entry 261: blue
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "palette bank 1")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "palette bank 1")
 
 	run := func(bmpna uint16) uint32 {
 		v := setupRBG1BitmapScene(t)
@@ -1053,15 +1144,15 @@ func TestRBG1BitmapColorModes(t *testing.T) {
 	modes := []mode{
 		{"16-color", 0, func(v *VDP2) {
 			v.vram[0] = 0x50
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"2048-color", 2, func(v *VDP2) {
 			writeVRAM16(v, 0, 0x0005)
 			writeVRAM16(v, 2, 0x0000)
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"32768-color", 3, func(v *VDP2) {
 			writeVRAM16(v, 0, 0x801F)
 			writeVRAM16(v, 2, 0x001F)
-		}, [3]uint8{255, 0, 0}},
+		}, [3]uint8{248, 0, 0}},
 		{"16770000-color", 4, func(v *VDP2) {
 			fill32(v, 0, 1, 0x8000, 0x00FF)
 			fill32(v, 4, 1, 0x0000, 0x00FF)
@@ -1074,9 +1165,9 @@ func TestRBG1BitmapColorModes(t *testing.T) {
 			m.fill(v)
 			v.cram[0], v.cram[1] = 0x03, 0xE0 // entry 0: green
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG1(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, m.name+" opaque dot")
+			expectRGB(t, v, buf, 0, 0, rbgOpaqueRed(m.chcn), 0, 0, m.name+" opaque dot")
 			expectTransparent(t, v, buf, 1, 0, m.name+" transparent dot")
 
 			v.regs[vdp2BGON] |= 1 << 13 // R1TPON
@@ -1102,15 +1193,15 @@ func TestRBG1CellColorModes(t *testing.T) {
 				v.vram[0x8000+i] = 5
 				v.vram[0x8100+i] = 0
 			}
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"2048-color", 2, func(v *VDP2) {
 			fillVRAM16(v, 0x8000, 64, 0x0005)
 			fillVRAM16(v, 0x8100, 64, 0x0000)
-		}, [3]uint8{0, 255, 0}},
+		}, [3]uint8{0, 248, 0}},
 		{"32768-color", 3, func(v *VDP2) {
 			fillVRAM16(v, 0x8000, 64, 0x801F)
 			fillVRAM16(v, 0x8100, 64, 0x001F)
-		}, [3]uint8{255, 0, 0}},
+		}, [3]uint8{248, 0, 0}},
 		{"16770000-color", 4, func(v *VDP2) {
 			fill32(v, 0x8000, 64, 0x8000, 0x00FF)
 			fill32(v, 0x8100, 64, 0x0000, 0x00FF)
@@ -1128,9 +1219,9 @@ func TestRBG1CellColorModes(t *testing.T) {
 			v.cram[0], v.cram[1] = 0x03, 0xE0   // entry 0: green
 			v.cram[10], v.cram[11] = 0x00, 0x1F // entry 5: red
 
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG1(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, m.name+" opaque dot")
+			expectRGB(t, v, buf, 0, 0, rbgOpaqueRed(m.chcn), 0, 0, m.name+" opaque dot")
 			expectTransparent(t, v, buf, 8, 0, m.name+" transparent dot")
 
 			v.regs[vdp2BGON] |= 1 << 13
@@ -1150,10 +1241,10 @@ func TestRBG1CellFlips(t *testing.T) {
 			msw           uint16
 			c00, c50, c05 [3]uint8
 		}{
-			{"none", 0x0001, [3]uint8{0, 0, 255}, [3]uint8{0, 255, 0}, [3]uint8{255, 0, 0}},
-			{"hflip", 0x4001, [3]uint8{0, 255, 0}, [3]uint8{0, 0, 255}, [3]uint8{255, 0, 0}},
-			{"vflip", 0x8001, [3]uint8{255, 0, 0}, [3]uint8{255, 0, 0}, [3]uint8{0, 0, 255}},
-			{"both", 0xC001, [3]uint8{255, 0, 0}, [3]uint8{255, 0, 0}, [3]uint8{0, 255, 0}},
+			{"none", 0x0001, [3]uint8{0, 0, 248}, [3]uint8{0, 248, 0}, [3]uint8{248, 0, 0}},
+			{"hflip", 0x4001, [3]uint8{0, 248, 0}, [3]uint8{0, 0, 248}, [3]uint8{248, 0, 0}},
+			{"vflip", 0x8001, [3]uint8{248, 0, 0}, [3]uint8{248, 0, 0}, [3]uint8{0, 0, 248}},
+			{"both", 0xC001, [3]uint8{248, 0, 0}, [3]uint8{248, 0, 0}, [3]uint8{0, 248, 0}},
 		}
 		for _, tc := range cases {
 			v := setupRBG1Identity(t)
@@ -1161,7 +1252,7 @@ func TestRBG1CellFlips(t *testing.T) {
 			writeRBGTestPalette(v)
 			writeVRAM16(v, 0, tc.msw)
 			writeVRAM16(v, 2, 0x0403)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG1(v, buf)
 			expectRGB(t, v, buf, 0, 0, tc.c00[0], tc.c00[1], tc.c00[2], tc.name)
 			expectRGB(t, v, buf, 5, 0, tc.c50[0], tc.c50[1], tc.c50[2], tc.name)
@@ -1169,10 +1260,10 @@ func TestRBG1CellFlips(t *testing.T) {
 		}
 	})
 	t.Run("2x2", func(t *testing.T) {
-		red := [3]uint8{255, 0, 0}
-		green := [3]uint8{0, 255, 0}
-		blue := [3]uint8{0, 0, 255}
-		white := [3]uint8{255, 255, 255}
+		red := [3]uint8{248, 0, 0}
+		green := [3]uint8{0, 248, 0}
+		blue := [3]uint8{0, 0, 248}
+		white := [3]uint8{248, 248, 248}
 		cases := []struct {
 			name           string
 			msw            uint16
@@ -1194,7 +1285,7 @@ func TestRBG1CellFlips(t *testing.T) {
 			v.cram[44], v.cram[45] = 0x7F, 0xFF // entry 22: white
 			writeVRAM16(v, 0, tc.msw)
 			writeVRAM16(v, 2, 0x0400)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG1(v, buf)
 			expectRGB(t, v, buf, 0, 0, tc.tl[0], tc.tl[1], tc.tl[2], tc.name+" top-left")
 			expectRGB(t, v, buf, 8, 0, tc.tr[0], tc.tr[1], tc.tr[2], tc.name+" top-right")
@@ -1210,7 +1301,7 @@ func TestRBG1CellFlips(t *testing.T) {
 // 64 vertically is plane E's page 0 with a 1x1 plane and plane A's
 // page 2 with a 2x2 plane.
 func TestRBG1PlaneSize(t *testing.T) {
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	// Horizontal: Xst_B = 512.
 	v := setupRBG1Scene(t)
@@ -1219,11 +1310,11 @@ func TestRBG1PlaneSize(t *testing.T) {
 	writeVRAM16(v, 0x4002, 0x0402) // page 1 cell (0,0): blue
 	v.regs[vdp2PLSZ] = 0x0000
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "1x1: cell 64 is plane B page 0")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "1x1: cell 64 is plane B page 0")
 	v.regs[vdp2PLSZ] = 0x1000
 	clear(buf)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "2x1: cell 64 is plane A page 1")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "2x1: cell 64 is plane A page 1")
 
 	// Vertical: Yst_B = 512. Page 2 lives at 0x8000, so this scene keeps
 	// its character data at 0x18000 instead.
@@ -1238,11 +1329,11 @@ func TestRBG1PlaneSize(t *testing.T) {
 	v.regs[vdp2PLSZ] = 0x0000
 	clear(buf)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "1x1: cell (0,64) is plane E page 0")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "1x1: cell (0,64) is plane E page 0")
 	v.regs[vdp2PLSZ] = 0x3000
 	clear(buf)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "2x2: cell (0,64) is plane A page 2")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "2x2: cell (0,64) is plane A page 2")
 }
 
 // TestRBG1Coefficient verifies RBG1 reads parameter B's coefficient
@@ -1261,7 +1352,7 @@ func TestRBG1Coefficient(t *testing.T) {
 		writeVRAM16(v, 0x18002, 0x0000)
 		return v
 	}
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	v := setup(0x0100, 0x8001) // MSB set: transparent
 	renderTestRBG1(v, buf)
@@ -1273,33 +1364,35 @@ func TestRBG1Coefficient(t *testing.T) {
 		ktctl    uint16
 		c80, c04 [3]uint8
 	}{
-		{"mode 0 kx and ky", 0x0100, [3]uint8{0, 255, 0}, [3]uint8{0, 0, 255}},
-		{"mode 1 kx", 0x0500, [3]uint8{0, 255, 0}, [3]uint8{255, 0, 0}},
-		{"mode 2 ky", 0x0900, [3]uint8{255, 0, 0}, [3]uint8{0, 0, 255}},
+		{"mode 0 kx and ky", 0x0100, [3]uint8{0, 248, 0}, [3]uint8{0, 0, 248}},
+		{"mode 1 kx", 0x0500, [3]uint8{0, 248, 0}, [3]uint8{248, 0, 0}},
+		{"mode 2 ky", 0x0900, [3]uint8{248, 0, 0}, [3]uint8{0, 0, 248}},
 	}
 	for _, tc := range cases {
 		v := setup(tc.ktctl, 0x0002) // value 2.0
 		clear(buf)
 		renderTestRBG1(v, buf)
-		expectRGB(t, v, buf, 0, 0, 255, 0, 0, tc.name+" origin")
+		expectRGB(t, v, buf, 0, 0, 248, 0, 0, tc.name+" origin")
 		expectRGB(t, v, buf, 8, 0, tc.c80[0], tc.c80[1], tc.c80[2], tc.name+" (8,0)")
 		expectRGB(t, v, buf, 0, 4, tc.c04[0], tc.c04[1], tc.c04[2], tc.name+" (0,4)")
 	}
 
 	// KLCE (KTCTL bit 12) stores the coefficient's line color bits
 	// (word 0 bits 14:8) with bit 7 set into the RBG1 line color buffer.
+	lineColor := make([]uint8, testFrameDots)
 	v = setup(0x1100, 0x2501)
 	clear(buf)
-	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "KLCE dot renders")
-	if lc := v.rbg1LCBuf[0]; lc != 0x80|0x25 {
-		t.Errorf("rbg1LCBuf[0] = 0x%02X, want 0xA5", lc)
+	renderTestRBG1LineColor(v, buf, lineColor)
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "KLCE dot renders")
+	if lc := lineColor[0]; lc != 0x80|0x25 {
+		t.Errorf("RBG1 line color[0] = 0x%02X, want 0xA5", lc)
 	}
 	v = setup(0x0100, 0x2501)
 	clear(buf)
-	renderTestRBG1(v, buf)
-	if lc := v.rbg1LCBuf[0]; lc&0x80 != 0 {
-		t.Errorf("KLCE off: rbg1LCBuf[0] = 0x%02X, want bit 7 clear", lc)
+	clear(lineColor)
+	renderTestRBG1LineColor(v, buf, lineColor)
+	if lc := lineColor[0]; lc&0x80 != 0 {
+		t.Errorf("KLCE off: RBG1 line color[0] = 0x%02X, want bit 7 clear", lc)
 	}
 }
 
@@ -1313,8 +1406,8 @@ func TestRBG1RPRCTLReReadRendering(t *testing.T) {
 		newHi  uint16
 		want   []uint8
 	}{
-		{"Xst", 0x0100, 0x00, 16, []uint8{0, 255, 0}},
-		{"Yst", 0x0200, 0x04, 8, []uint8{0, 0, 255}},
+		{"Xst", 0x0100, 0x00, 16, []uint8{0, 248, 0}},
+		{"Yst", 0x0200, 0x04, 8, []uint8{0, 0, 248}},
 		{"KAst", 0x0400, 0x54, 0x6080, nil},
 	}
 	for _, tc := range cases {
@@ -1330,7 +1423,7 @@ func TestRBG1RPRCTLReReadRendering(t *testing.T) {
 				writeVRAM16(v, 0x18200, 0x8001)
 				writeVRAM16(v, 0x18202, 0x0000)
 			}
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			v.BeginFrame()
 			v.decodeLineState()
 			if !v.frame.rbg1Active {
@@ -1342,9 +1435,10 @@ func TestRBG1RPRCTLReReadRendering(t *testing.T) {
 				if y == 3 {
 					writeRotParam32(v, base, tc.offset, tc.newHi, 0x0000)
 				}
-				v.rbg1SpanSetup(buf, &v.frame.rbg1, &v.frame.rbg1F, y)(0, v.frame.width)
+				v.rbg1SpanSetup(&v.frame.rbg1, &v.frame.rbg1F, y)
+				rbgSpanTest(v, buf, nil, &v.rowRecord(y).RBG[1], 0, v.frame.width)
 			}
-			expectRGB(t, v, buf, 0, 4, 255, 0, 0, "line 4 keeps the frame-start value")
+			expectRGB(t, v, buf, 0, 4, 248, 0, 0, "line 4 keeps the frame-start value")
 			if tc.want == nil {
 				expectTransparent(t, v, buf, 0, 5, "armed line re-reads")
 				expectTransparent(t, v, buf, 0, 6, "line after the armed line keeps the re-read")
@@ -1367,14 +1461,14 @@ func TestRBG1MatrixTranspose(t *testing.T) {
 	writeRotParam32(v, paramB, 0x20, 0x0001, 0x0000) // B = 1.0
 	writeRotParam32(v, paramB, 0x28, 0x0001, 0x0000) // D = 1.0
 	writeRotParam32(v, paramB, 0x2C, 0x0000, 0x0000) // E = 0
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "map (0,0)")
-	expectRGB(t, v, buf, 7, 7, 255, 0, 0, "map (7,7)")
-	expectRGB(t, v, buf, 0, 16, 0, 255, 0, "screen (0,16) -> map (16,0)")
-	expectRGB(t, v, buf, 3, 40, 0, 255, 0, "screen (3,40) -> map (40,3)")
-	expectRGB(t, v, buf, 8, 0, 0, 0, 255, "screen (8,0) -> map (0,8)")
-	expectRGB(t, v, buf, 15, 7, 0, 0, 255, "screen (15,7) -> map (7,15)")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "map (0,0)")
+	expectRGB(t, v, buf, 7, 7, 248, 0, 0, "map (7,7)")
+	expectRGB(t, v, buf, 0, 16, 0, 248, 0, "screen (0,16) -> map (16,0)")
+	expectRGB(t, v, buf, 3, 40, 0, 248, 0, "screen (3,40) -> map (40,3)")
+	expectRGB(t, v, buf, 8, 0, 0, 0, 248, "screen (8,0) -> map (0,8)")
+	expectRGB(t, v, buf, 15, 7, 0, 0, 248, "screen (15,7) -> map (7,15)")
 }
 
 // writeBitmapRow8Blue writes bitmap rows 8-15 dots 0-15 as index 7
@@ -1403,20 +1497,22 @@ type rbgSurface struct {
 	ktKLCE   uint16 // KTCTL line color enable bit
 	ktaofSh  uint   // KTAOF shift of the offset field
 	oneWord  uint16 // KTCTL one-word table bit
-	lcBuf    func(v *VDP2) []uint8
-	bitmap   bool
-	mzctlEn  uint16 // MZCTL mosaic enable bit
-	rprArmX  uint16 // RPRCTL arm bits for Xst, Yst, KAst
-	rprArmY  uint16
-	rprArmK  uint16
-	hiResFix bool
+	// renderLineColor renders as render does, the coefficient line
+	// colors into lc.
+	renderLineColor func(v *VDP2, buf []uint32, lc []uint8)
+	bitmap          bool
+	mzctlEn         uint16 // MZCTL mosaic enable bit
+	rprArmX         uint16 // RPRCTL arm bits for Xst, Yst, KAst
+	rprArmY         uint16
+	rprArmK         uint16
+	hiResFix        bool
 }
 
 func rbgSurfaces() []rbgSurface {
 	rbg0A := func(bitmap bool) rbgSurface {
 		s := rbgSurface{
 			name: "RBG0 cell A", param: 0x10000, ktEnable: 0x0001, ktMode: 2, ktKLCE: 0x0010,
-			ktaofSh: 0, oneWord: 0x0002, lcBuf: func(v *VDP2) []uint8 { return v.rbg0LCBuf },
+			ktaofSh: 0, oneWord: 0x0002, renderLineColor: renderTestRBG0LineColor,
 			render: renderTestRBG0, mzctlEn: 1 << 4, rprArmX: 0x0001, rprArmY: 0x0002, rprArmK: 0x0004,
 		}
 		if bitmap {
@@ -1435,7 +1531,7 @@ func rbgSurfaces() []rbgSurface {
 	rbg0B := func(bitmap bool) rbgSurface {
 		s := rbgSurface{
 			name: "RBG0 cell B", param: 0x10080, ktEnable: 0x0100, ktMode: 10, ktKLCE: 0x1000,
-			ktaofSh: 8, oneWord: 0x0200, lcBuf: func(v *VDP2) []uint8 { return v.rbg0LCBuf },
+			ktaofSh: 8, oneWord: 0x0200, renderLineColor: renderTestRBG0LineColor,
 			render: renderTestRBG0, mzctlEn: 1 << 4, rprArmX: 0x0100, rprArmY: 0x0200, rprArmK: 0x0400,
 		}
 		if bitmap {
@@ -1461,7 +1557,7 @@ func rbgSurfaces() []rbgSurface {
 	rbg1 := func(bitmap bool) rbgSurface {
 		s := rbgSurface{
 			name: "RBG1 cell", param: 0x10080, ktEnable: 0x0100, ktMode: 10, ktKLCE: 0x1000,
-			ktaofSh: 8, oneWord: 0x0200, lcBuf: func(v *VDP2) []uint8 { return v.rbg1LCBuf },
+			ktaofSh: 8, oneWord: 0x0200, renderLineColor: renderTestRBG1LineColor,
 			render: renderTestRBG1, mzctlEn: 1 << 0, rprArmX: 0x0100, rprArmY: 0x0200, rprArmK: 0x0400,
 		}
 		if bitmap {
@@ -1502,15 +1598,15 @@ func TestRBGCoefficientModesKxKy(t *testing.T) {
 			mode     uint16
 			c80, c04 [3]uint8
 		}{
-			{"mode 1 kx", 1, [3]uint8{0, 255, 0}, [3]uint8{255, 0, 0}},
-			{"mode 2 ky", 2, [3]uint8{255, 0, 0}, [3]uint8{0, 0, 255}},
+			{"mode 1 kx", 1, [3]uint8{0, 248, 0}, [3]uint8{248, 0, 0}},
+			{"mode 2 ky", 2, [3]uint8{248, 0, 0}, [3]uint8{0, 0, 248}},
 		} {
 			t.Run(s.name+" "+tc.name, func(t *testing.T) {
 				v := s.setup(t)
 				s.setCoefTable(v, tc.mode, 0x0002, 0x0000)
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				s.render(v, buf)
-				expectRGB(t, v, buf, 0, 0, 255, 0, 0, "origin")
+				expectRGB(t, v, buf, 0, 0, 248, 0, 0, "origin")
 				expectRGB(t, v, buf, 8, 0, tc.c80[0], tc.c80[1], tc.c80[2], "(8,0)")
 				expectRGB(t, v, buf, 0, 4, tc.c04[0], tc.c04[1], tc.c04[2], "(0,4)")
 			})
@@ -1528,18 +1624,20 @@ func TestRBGCoefficientKLCE(t *testing.T) {
 			v := s.setup(t)
 			s.setCoefTable(v, 0, 0x2501, 0x0000)
 			v.regs[vdp2KTCTL] |= s.ktKLCE
-			buf := make([]uint32, 352*256)
-			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "dot renders")
-			if lc := s.lcBuf(v)[0]; lc != 0xA5 {
+			buf := make([]uint32, testFrameDots)
+			lineColor := make([]uint8, testFrameDots)
+			s.renderLineColor(v, buf, lineColor)
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "dot renders")
+			if lc := lineColor[0]; lc != 0xA5 {
 				t.Errorf("line color buffer[0] = 0x%02X, want 0xA5", lc)
 			}
 
 			v = s.setup(t)
 			s.setCoefTable(v, 0, 0x2501, 0x0000)
 			clear(buf)
-			s.render(v, buf)
-			if lc := s.lcBuf(v)[0]; lc&0x80 != 0 {
+			clear(lineColor)
+			s.renderLineColor(v, buf, lineColor)
+			if lc := lineColor[0]; lc&0x80 != 0 {
 				t.Errorf("KLCE off: line color buffer[0] = 0x%02X, want bit 7 clear", lc)
 			}
 		})
@@ -1561,9 +1659,9 @@ func TestRBGCoefficientKTAOF(t *testing.T) {
 			s.setCoefTable(v, 0, 0x0001, 0x0000)
 			writeVRAM16(v, 0x58000, 0x8001)
 			writeVRAM16(v, 0x58002, 0x0000)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "KTAOF 0 reads 0x18000")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "KTAOF 0 reads 0x18000")
 			v.regs[vdp2KTAOF] = 1 << s.ktaofSh
 			clear(buf)
 			s.render(v, buf)
@@ -1577,9 +1675,9 @@ func TestRBGCoefficientKTAOF(t *testing.T) {
 			// 0x20000. Value format is sign+4.10 in bits 14:0.
 			writeVRAM16(v, 0xC000, 0x0400)  // 1.0
 			writeVRAM16(v, 0x2C000, 0x8400) // MSB set
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "1-word KTAOF 0 reads 0xC000")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "1-word KTAOF 0 reads 0xC000")
 			v.regs[vdp2KTAOF] = 1 << s.ktaofSh
 			clear(buf)
 			s.render(v, buf)
@@ -1600,11 +1698,11 @@ func TestRBGCoefficientOneWordValue(t *testing.T) {
 			s.setCoefTable(v, 0, 0x0000, 0x0000)
 			v.regs[vdp2KTCTL] |= s.oneWord
 			writeVRAM16(v, 0xC000, 0x0800) // 2.0
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "origin")
-			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "(8,0) -> map 16")
-			expectRGB(t, v, buf, 0, 4, 0, 0, 255, "(0,4) -> map row 8")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "origin")
+			expectRGB(t, v, buf, 8, 0, 0, 248, 0, "(8,0) -> map 16")
+			expectRGB(t, v, buf, 0, 4, 0, 0, 248, "(0,4) -> map row 8")
 		})
 	}
 }
@@ -1626,10 +1724,10 @@ func TestRBGLineKAst(t *testing.T) {
 				writeVRAM16(v, 0x18000+line*4, hi)
 				writeVRAM16(v, 0x18002+line*4, 0x0000)
 			}
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "line 0")
-			expectRGB(t, v, buf, 0, 3, 255, 0, 0, "line 3")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "line 0")
+			expectRGB(t, v, buf, 0, 3, 248, 0, 0, "line 3")
 			expectTransparent(t, v, buf, 0, 4, "line 4")
 			expectTransparent(t, v, buf, 0, 7, "line 7")
 		})
@@ -1645,18 +1743,18 @@ func TestRBGCoefficientMode3Xp(t *testing.T) {
 		t.Run(s.name, func(t *testing.T) {
 			v := s.setup(t)
 			s.setCoefTable(v, 3, 0x0000, 0x1000) // +16.0
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "Xp +16 origin")
-			expectRGB(t, v, buf, 15, 0, 0, 255, 0, "Xp +16 (15,0)")
+			expectRGB(t, v, buf, 0, 0, 0, 248, 0, "Xp +16 origin")
+			expectRGB(t, v, buf, 15, 0, 0, 248, 0, "Xp +16 (15,0)")
 
 			v = s.setup(t)
 			s.setCoefTable(v, 3, 0x00FF, 0xF000) // -16.0
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 16, 0, 255, 0, 0, "Xp -16 (16,0) -> map 0")
-			expectRGB(t, v, buf, 24, 0, 255, 0, 0, "Xp -16 (24,0) -> map 8")
-			expectRGB(t, v, buf, 32, 0, 0, 255, 0, "Xp -16 (32,0) -> map 16")
+			expectRGB(t, v, buf, 16, 0, 248, 0, 0, "Xp -16 (16,0) -> map 0")
+			expectRGB(t, v, buf, 24, 0, 248, 0, 0, "Xp -16 (24,0) -> map 8")
+			expectRGB(t, v, buf, 32, 0, 0, 248, 0, "Xp -16 (32,0) -> map 16")
 
 			// 1-word mode 3: sign+12.2 in bits 14:0 (value << 8 gives .10).
 			v = s.setup(t)
@@ -1665,12 +1763,12 @@ func TestRBGCoefficientMode3Xp(t *testing.T) {
 			writeVRAM16(v, 0xC000, 0x0040) // +16.0
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "1-word Xp +16 origin")
+			expectRGB(t, v, buf, 0, 0, 0, 248, 0, "1-word Xp +16 origin")
 			writeVRAM16(v, 0xC000, 0x7FC0) // -16.0
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 16, 0, 255, 0, 0, "1-word Xp -16 (16,0) -> map 0")
-			expectRGB(t, v, buf, 32, 0, 0, 255, 0, "1-word Xp -16 (32,0) -> map 16")
+			expectRGB(t, v, buf, 16, 0, 248, 0, 0, "1-word Xp -16 (16,0) -> map 0")
+			expectRGB(t, v, buf, 32, 0, 0, 248, 0, "1-word Xp -16 (32,0) -> map 16")
 		})
 	}
 }
@@ -1705,12 +1803,12 @@ func TestRBGCoefficientNegative(t *testing.T) {
 				v := s.setup(t)
 				writeRotParam32(v, s.param, 0x44, 0x0020, 0x0000) // Mx = 32
 				tc.apply(v)
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				s.render(v, buf)
-				expectRGB(t, v, buf, 0, 0, 0, 255, 0, "(0,0) -> map 32")
-				expectRGB(t, v, buf, 8, 0, 0, 255, 0, "(8,0) -> map 16")
-				expectRGB(t, v, buf, 12, 0, 255, 0, 0, "(12,0) -> map 8")
-				expectRGB(t, v, buf, 16, 0, 255, 0, 0, "(16,0) -> map 0")
+				expectRGB(t, v, buf, 0, 0, 0, 248, 0, "(0,0) -> map 32")
+				expectRGB(t, v, buf, 8, 0, 0, 248, 0, "(8,0) -> map 16")
+				expectRGB(t, v, buf, 12, 0, 248, 0, 0, "(12,0) -> map 8")
+				expectRGB(t, v, buf, 16, 0, 248, 0, 0, "(16,0) -> map 0")
 			})
 		}
 	}
@@ -1732,7 +1830,7 @@ func TestRBGCoefficientFromCRAM(t *testing.T) {
 				writeRotParam32(v, s.param, 0x58, 0x0000, 0x0000)
 				v.cram[0x800], v.cram[0x801] = uint8(w0>>8), uint8(w0)
 				v.cram[0x802], v.cram[0x803] = 0, 0
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				s.render(v, buf)
 				return buf
 			}
@@ -1741,8 +1839,8 @@ func TestRBGCoefficientFromCRAM(t *testing.T) {
 			buf := run(0x8001)
 			expectTransparent(t, v, buf, 0, 0, "CRAM coefficient MSB=1")
 			buf = run(0x0002)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "CRAM coefficient 2.0 origin")
-			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "CRAM coefficient 2.0 (8,0)")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "CRAM coefficient 2.0 origin")
+			expectRGB(t, v, buf, 8, 0, 0, 248, 0, "CRAM coefficient 2.0 (8,0)")
 		})
 	}
 }
@@ -1762,17 +1860,17 @@ func TestRBGPerDotCoefficientBank(t *testing.T) {
 				writeVRAM16(v, 0x18004, 0x8001)
 				writeVRAM16(v, 0x18006, 0x0000)
 				v.regs[vdp2RAMCTL] = ramctl
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				s.render(v, buf)
 				return buf
 			}
 			v := s.setup(t)
 			v.BeginFrame()
 			buf := run(0x0001)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "designated: dot 0")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "designated: dot 0")
 			expectTransparent(t, v, buf, 1, 0, "designated: dot 1 reads its own entry")
 			buf = run(0x0000)
-			expectRGB(t, v, buf, 1, 0, 255, 0, 0, "undesignated: dot 1 keeps the line coefficient")
+			expectRGB(t, v, buf, 1, 0, 248, 0, 0, "undesignated: dot 1 keeps the line coefficient")
 		})
 	}
 }
@@ -1789,8 +1887,8 @@ func TestRBGRPRCTLReReadAllSurfaces(t *testing.T) {
 			newHi  uint16
 			want   []uint8
 		}{
-			{"Xst", s.rprArmX, 0x00, 16, []uint8{0, 255, 0}},
-			{"Yst", s.rprArmY, 0x04, 8, []uint8{0, 0, 255}},
+			{"Xst", s.rprArmX, 0x00, 16, []uint8{0, 248, 0}},
+			{"Yst", s.rprArmY, 0x04, 8, []uint8{0, 0, 248}},
 			{"KAst", s.rprArmK, 0x54, 0x6080, nil},
 		} {
 			t.Run(s.name+" "+tc.name, func(t *testing.T) {
@@ -1800,7 +1898,7 @@ func TestRBGRPRCTLReReadAllSurfaces(t *testing.T) {
 					writeVRAM16(v, 0x18200, 0x8001)
 					writeVRAM16(v, 0x18202, 0x0000)
 				}
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				v.BeginFrame()
 				v.decodeLineState()
 				v.vLine = 5
@@ -1810,12 +1908,14 @@ func TestRBGRPRCTLReReadAllSurfaces(t *testing.T) {
 						writeRotParam32(v, s.param, tc.offset, tc.newHi, 0x0000)
 					}
 					if s.name[:4] == "RBG1" {
-						v.rbg1SpanSetup(buf, &v.frame.rbg1, &v.frame.rbg1F, y)(0, v.frame.width)
+						v.rbg1SpanSetup(&v.frame.rbg1, &v.frame.rbg1F, y)
+						rbgSpanTest(v, buf, nil, &v.rowRecord(y).RBG[1], 0, v.frame.width)
 					} else {
-						v.rbg0SpanSetup(buf, &v.frame.rbg0, &v.frame.rbg0F, y)(0, v.frame.width)
+						v.rbg0SpanSetup(&v.frame.rbg0, &v.frame.rbg0F, y)
+						rbgSpanTest(v, buf, nil, &v.rowRecord(y).RBG[0], 0, v.frame.width)
 					}
 				}
-				expectRGB(t, v, buf, 0, 4, 255, 0, 0, "line 4 keeps the frame-start value")
+				expectRGB(t, v, buf, 0, 4, 248, 0, 0, "line 4 keeps the frame-start value")
 				if tc.want == nil {
 					expectTransparent(t, v, buf, 0, 5, "armed line re-reads")
 				} else {
@@ -1845,21 +1945,21 @@ func TestRBGMosaicHorizontal(t *testing.T) {
 				v.vram[17] = 7
 				v.cram[14], v.cram[15] = 0x7C, 0x00
 				x = 17
-				plain = [3]uint8{0, 0, 255}
+				plain = [3]uint8{0, 0, 248}
 				v.regs[vdp2MZCTL] = s.mzctlEn | 0x0F00 // mosaic 16
 			} else {
 				writeRBGTestOverTile(v, 0x403)
 				writeVRAM16(v, 2, 0x0403) // cell (0,0) -> over tile
 				x = 5
-				plain = [3]uint8{0, 255, 0}
+				plain = [3]uint8{0, 248, 0}
 				v.regs[vdp2MZCTL] = s.mzctlEn | 0x0700 // mosaic 8
 			}
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
 			if s.bitmap {
-				expectRGB(t, v, buf, x, 0, 0, 255, 0, "mosaic samples dot 16")
+				expectRGB(t, v, buf, x, 0, 0, 248, 0, "mosaic samples dot 16")
 			} else {
-				expectRGB(t, v, buf, x, 0, 0, 0, 255, "mosaic samples dot 0")
+				expectRGB(t, v, buf, x, 0, 0, 0, 248, "mosaic samples dot 0")
 			}
 			v.regs[vdp2MZCTL] = 0
 			clear(buf)
@@ -1882,14 +1982,14 @@ func TestRBGHiResDotPairs(t *testing.T) {
 			v := s.setup(t)
 			writeRotParam32(v, s.param, 0x00, 8, 0x0000)
 			v.hiRes = true
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 15, 0, 255, 0, 0, "hi-res x 15 -> map 15")
-			expectRGB(t, v, buf, 16, 0, 0, 255, 0, "hi-res x 16 -> map 16")
+			expectRGB(t, v, buf, 15, 0, 248, 0, 0, "hi-res x 15 -> map 15")
+			expectRGB(t, v, buf, 16, 0, 0, 248, 0, "hi-res x 16 -> map 16")
 			v.hiRes = false
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 15, 0, 0, 255, 0, "normal x 15 -> map 23")
+			expectRGB(t, v, buf, 15, 0, 0, 248, 0, "normal x 15 -> map 23")
 		})
 	}
 }
@@ -1901,10 +2001,10 @@ func TestRBG1WrapReadsLastCell(t *testing.T) {
 	writeRotParam32(v, 0x10080, 0x00, rbgXstNeg8, 0x0000)
 	// Map cell 255 is plane D (page 0) cell (63,0).
 	writeRBGTestCell(v, 63, 0, 0x402)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG1(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 0, 255, "map X -8 wraps to cell 255")
-	expectRGB(t, v, buf, 8, 0, 255, 0, 0, "map X 0")
+	expectRGB(t, v, buf, 0, 0, 0, 0, 248, "map X -8 wraps to cell 255")
+	expectRGB(t, v, buf, 8, 0, 248, 0, 0, "map X 0")
 }
 
 // TestRPWindowNoWindowsLogicBit verifies the rotation parameter window
@@ -1914,16 +2014,16 @@ func TestRBG1WrapReadsLastCell(t *testing.T) {
 func TestRPWindowNoWindowsLogicBit(t *testing.T) {
 	v := setupRBG0ParamAB(t)
 	v.regs[vdp2RPMD] = 0x0003
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	v.regs[vdp2WCTLD] = 0x0000
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 255, 0, 0, "logic 0: parameter A everywhere")
-	expectRGB(t, v, buf, 12, 5, 255, 0, 0, "logic 0: parameter A everywhere")
+	expectRGB(t, v, buf, 0, 0, 248, 0, 0, "logic 0: parameter A everywhere")
+	expectRGB(t, v, buf, 12, 5, 248, 0, 0, "logic 0: parameter A everywhere")
 	v.regs[vdp2WCTLD] = 0x0080
 	clear(buf)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 0, 0, 0, 255, 0, "logic 1: parameter B everywhere")
-	expectRGB(t, v, buf, 12, 5, 0, 255, 0, "logic 1: parameter B everywhere")
+	expectRGB(t, v, buf, 0, 0, 0, 248, 0, "logic 1: parameter B everywhere")
+	expectRGB(t, v, buf, 12, 5, 0, 248, 0, "logic 1: parameter B everywhere")
 }
 
 // TestRPWindowLineWindowTable verifies the rotation parameter window
@@ -1955,13 +2055,13 @@ func TestRPWindowLineWindowTable(t *testing.T) {
 			writeVRAM16(v, 0x40006, 0)
 			writeVRAM16(v, 0x40008, 8)
 			writeVRAM16(v, 0x4000A, 40)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 3, 0, 0, 255, 0, "line 0 x 3 inside -> B")
-			expectRGB(t, v, buf, 12, 0, 255, 0, 0, "line 0 x 12 outside -> A")
-			expectRGB(t, v, buf, 3, 1, 255, 0, 0, "line 1 excluded -> A")
-			expectRGB(t, v, buf, 3, 2, 255, 0, 0, "line 2 x 3 outside -> A")
-			expectRGB(t, v, buf, 12, 2, 0, 255, 0, "line 2 x 12 inside -> B")
+			expectRGB(t, v, buf, 3, 0, 0, 248, 0, "line 0 x 3 inside -> B")
+			expectRGB(t, v, buf, 12, 0, 248, 0, 0, "line 0 x 12 outside -> A")
+			expectRGB(t, v, buf, 3, 1, 248, 0, 0, "line 1 excluded -> A")
+			expectRGB(t, v, buf, 3, 2, 248, 0, 0, "line 2 x 3 outside -> A")
+			expectRGB(t, v, buf, 12, 2, 0, 248, 0, "line 2 x 12 inside -> B")
 		})
 	}
 }
@@ -1990,12 +2090,12 @@ func TestRBGOneWordPatternName(t *testing.T) {
 			writeVRAM16(v, 0, 0x1000) // cell (0,0): palette 1, character 0x400
 			writeVRAM16(v, 2, 0x1001) // cell (1,0): character 0x401
 			writeVRAM16(v, 4, 0x1403) // cell (2,0): character 0x403, hflip
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			tc.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "cell 0")
-			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "cell 1")
-			expectRGB(t, v, buf, 16, 0, 0, 255, 0, "cell 2 hflip dot 0")
-			expectRGB(t, v, buf, 21, 0, 0, 0, 255, "cell 2 hflip dot 5")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "cell 0")
+			expectRGB(t, v, buf, 8, 0, 0, 248, 0, "cell 1")
+			expectRGB(t, v, buf, 16, 0, 0, 248, 0, "cell 2 hflip dot 0")
+			expectRGB(t, v, buf, 21, 0, 0, 0, 248, "cell 2 hflip dot 5")
 		})
 	}
 }
@@ -2043,10 +2143,10 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			}
 			v.cram[10], v.cram[11] = 0x00, 0x1F
 			v.regs[s.ovpn] = 0x0000 // palette 0, character 0x400
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "256-color over dot")
-			expectRGB(t, v, buf, 7, 7, 255, 0, 0, "256-color over dot")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "256-color over dot")
+			expectRGB(t, v, buf, 7, 7, 248, 0, 0, "256-color over dot")
 		})
 		t.Run(s.name+" 2048-color", func(t *testing.T) {
 			v := base(t)
@@ -2054,9 +2154,9 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			fillVRAM16(v, 0x8000, 64, 0x0005)
 			v.cram[10], v.cram[11] = 0x00, 0x1F
 			v.regs[s.ovpn] = 0x0000
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "2048-color over dot")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "2048-color over dot")
 			fillVRAM16(v, 0x8000, 64, 0x0000) // index 0: transparent
 			clear(buf)
 			s.render(v, buf)
@@ -2067,9 +2167,9 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			v.regs[s.chctl] = 3 << s.chShif
 			fillVRAM16(v, 0x8000, 64, 0x83E0)
 			v.regs[s.ovpn] = 0x0000
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "32K over dot")
+			expectRGB(t, v, buf, 0, 0, 0, 248, 0, "32K over dot")
 			fillVRAM16(v, 0x8000, 64, 0x03E0) // MSB clear: transparent
 			clear(buf)
 			s.render(v, buf)
@@ -2080,7 +2180,7 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			v.regs[s.chctl] = 4 << s.chShif
 			fill32(v, 0x8000, 64, 0x8000, 0xFF00) // green, MSB set
 			v.regs[s.ovpn] = 0x0000
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
 			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "16M over dot")
 			fill32(v, 0x8000, 64, 0x0000, 0xFF00) // MSB clear: transparent
@@ -2108,17 +2208,17 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			// 9:0 = 0x100 with no supplement.
 			v.regs[s.pnc] = 0x0000
 			v.regs[s.ovpn] = 0x1100 // palette 1, character 0x400
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "2x2 over top-left")
-			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "2x2 over top-right")
-			expectRGB(t, v, buf, 0, 8, 0, 0, 255, "2x2 over bottom-left")
-			expectRGB(t, v, buf, 8, 8, 255, 255, 255, "2x2 over bottom-right")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "2x2 over top-left")
+			expectRGB(t, v, buf, 8, 0, 0, 248, 0, "2x2 over top-right")
+			expectRGB(t, v, buf, 0, 8, 0, 0, 248, "2x2 over bottom-left")
+			expectRGB(t, v, buf, 8, 8, 248, 248, 248, "2x2 over bottom-right")
 			v.regs[s.ovpn] = 0x1100 | 0x0C00 // both flips
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 255, 255, "2x2 over flipped top-left")
-			expectRGB(t, v, buf, 8, 8, 255, 0, 0, "2x2 over flipped bottom-right")
+			expectRGB(t, v, buf, 0, 0, 248, 248, 248, "2x2 over flipped top-left")
+			expectRGB(t, v, buf, 8, 8, 248, 0, 0, "2x2 over flipped bottom-right")
 		})
 		// A screen priority of 1 under special priority mode 1 becomes 0
 		// for characters whose special priority bit is clear, and a dot
@@ -2135,7 +2235,7 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 				sfShift = 0
 			}
 			v.regs[vdp2SFPRMD] = 1 << sfShift
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
 			expectTransparent(t, v, buf, 0, 0, "over dot, special bit clear")
 			expectTransparent(t, v, buf, 8, 0, "in-plane dot, special bit clear")
@@ -2144,8 +2244,8 @@ func TestRBGScreenOverPatternFormats(t *testing.T) {
 			writeVRAM16(v, 0, 0x2001) // in-plane cell special priority bit
 			clear(buf)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "over dot, special bit set")
-			expectRGB(t, v, buf, 8, 0, 255, 0, 0, "in-plane dot, special bit set")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "over dot, special bit set")
+			expectRGB(t, v, buf, 8, 0, 248, 0, 0, "in-plane dot, special bit set")
 			if pri := (buf[0] >> 24) & 7; pri != 1 {
 				t.Errorf("over dot priority %d, want 1", pri)
 			}
@@ -2256,7 +2356,7 @@ func TestRBGSpecialFunctionMode2And3(t *testing.T) {
 				if cramMSB {
 					v.cram[s.cramOff] |= 0x80
 				}
-				buf := make([]uint32, 352*256)
+				buf := make([]uint32, testFrameDots)
 				s.render(v, buf)
 				if buf[x] == 0 {
 					t.Fatalf("sample dot transparent (pri=%v cc=%v sfprmd=%d sfccmd=%d sfcode=0x%02X)", pri, cc, sfprmd, sfccmd, sfcode)
@@ -2311,6 +2411,7 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 		render func(v *VDP2, buf []uint32)
 		sfShif uint
 		ccctl  uint16
+		red    uint8 // red channel of the RGB dot
 	}
 	rgbCell := func(v *VDP2) {
 		fillVRAM16(v, 0x8000, 64, 0x801F)
@@ -2323,13 +2424,13 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 			v.regs[vdp2CHCTLB] = 0x3000
 			rgbCell(v)
 			return v
-		}, renderTestRBG0, 8, 1 << 4},
+		}, renderTestRBG0, 8, 1 << 4, 248},
 		{"RBG0 bitmap", func(t *testing.T) *VDP2 {
 			v := setupRBG0BitmapIdentity(t)
 			v.regs[vdp2CHCTLB] = 0x3200
 			writeVRAM16(v, 0, 0x801F)
 			return v
-		}, renderTestRBG0, 8, 1 << 4},
+		}, renderTestRBG0, 8, 1 << 4, 248},
 		{"RBG0 cell 16M", func(t *testing.T) *VDP2 {
 			v := setupRBG0Identity(t)
 			v.regs[vdp2CHCTLB] = 0x4000
@@ -2337,13 +2438,13 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 			writeVRAM16(v, 0, 0x0000)
 			writeVRAM16(v, 2, 0x0400)
 			return v
-		}, renderTestRBG0, 8, 1 << 4},
+		}, renderTestRBG0, 8, 1 << 4, 255},
 		{"RBG1 bitmap 16M", func(t *testing.T) *VDP2 {
 			v := setupRBG1BitmapScene(t)
 			v.regs[vdp2CHCTLA] = 0x0042
 			fill32(v, 0, 1, 0x8000, 0x00FF)
 			return v
-		}, renderTestRBG1, 0, 1 << 0},
+		}, renderTestRBG1, 0, 1 << 0, 255},
 		{"RBG0 over pattern", func(t *testing.T) *VDP2 {
 			v := setupRBG0Identity(t)
 			v.regs[vdp2CHCTLB] = 0x3000
@@ -2353,19 +2454,19 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 			fillVRAM16(v, 0x8000, 64, 0x801F)
 			writeRotParam32(v, 0x10000, 0x00, rbgXstNeg8, 0x0000)
 			return v
-		}, renderTestRBG0, 8, 1 << 4},
+		}, renderTestRBG0, 8, 1 << 4, 248},
 		{"RBG1 cell", func(t *testing.T) *VDP2 {
 			v := setupRBG1Identity(t)
 			v.regs[vdp2CHCTLA] = 0x0030
 			rgbCell(v)
 			return v
-		}, renderTestRBG1, 0, 1 << 0},
+		}, renderTestRBG1, 0, 1 << 0, 248},
 		{"RBG1 bitmap", func(t *testing.T) *VDP2 {
 			v := setupRBG1BitmapScene(t)
 			v.regs[vdp2CHCTLA] = 0x0032
 			writeVRAM16(v, 0, 0x801F)
 			return v
-		}, renderTestRBG1, 0, 1 << 0},
+		}, renderTestRBG1, 0, 1 << 0, 248},
 		{"RBG1 over pattern", func(t *testing.T) *VDP2 {
 			v := setupRBG1Identity(t)
 			v.regs[vdp2CHCTLA] = 0x0030
@@ -2375,16 +2476,16 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 			fillVRAM16(v, 0x8000, 64, 0x801F)
 			writeRotParam32(v, 0x10080, 0x00, rbgXstNeg8, 0x0000)
 			return v
-		}, renderTestRBG1, 0, 1 << 0},
+		}, renderTestRBG1, 0, 1 << 0, 248},
 	}
 	for _, s := range surfaces {
 		t.Run(s.name, func(t *testing.T) {
 			v := s.build(t)
 			v.regs[vdp2SFCCMD] = 3 << s.sfShif
 			v.regs[vdp2CCCTL] = s.ccctl
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			s.render(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "RGB dot")
+			expectRGB(t, v, buf, 0, 0, s.red, 0, 0, "RGB dot")
 			if buf[0]&layerCCBit == 0 {
 				t.Error("SFCCMD 3 on RGB format with screen CC on: CC bit clear")
 			}
@@ -2403,7 +2504,7 @@ func TestRBGSpecialCCMode3RGB(t *testing.T) {
 // effective-priority-zero transparency on both bitmap surfaces (screen
 // priority 1, special priority bit clear).
 func TestRBGBitmapSpecialBitsMode1(t *testing.T) {
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 
 	run := func(bmpnb uint16) uint32 {
 		v := setupRBG0BitmapParamAB(t)
@@ -2481,19 +2582,20 @@ func TestRBG0RPMD2SwitchedBCoefficient(t *testing.T) {
 			writeRotParam32(v, 0x10080, 0x58, 0x0000, 0x0000)
 			return v
 		}
-		buf := make([]uint32, 352*256)
+		buf := make([]uint32, testFrameDots)
 
 		t.Run(surf.name+" B mode 1 kx and KLCE", func(t *testing.T) {
 			v := base(t, 0x0400|0x1000)
 			writeVRAM16(v, 0x18100, 0x2502) // lc 0x25, kx 2.0
 			writeVRAM16(v, 0x18102, 0x0000)
 			clear(buf)
-			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "origin")
-			expectRGB(t, v, buf, 8, 0, 0, 255, 0, "(8,0) -> map 16 (kx doubled)")
-			expectRGB(t, v, buf, 0, 4, 255, 0, 0, "(0,4) -> map row 4 (ky unchanged)")
-			if lc := v.rbg0LCBuf[0]; lc != 0xA5 {
-				t.Errorf("rbg0LCBuf[0] = 0x%02X, want 0xA5", lc)
+			lineColor := make([]uint8, testFrameDots)
+			renderTestRBG0LineColor(v, buf, lineColor)
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "origin")
+			expectRGB(t, v, buf, 8, 0, 0, 248, 0, "(8,0) -> map 16 (kx doubled)")
+			expectRGB(t, v, buf, 0, 4, 248, 0, 0, "(0,4) -> map row 4 (ky unchanged)")
+			if lc := lineColor[0]; lc != 0xA5 {
+				t.Errorf("RBG0 line color[0] = 0x%02X, want 0xA5", lc)
 			}
 		})
 		t.Run(surf.name+" B mode 2 ky", func(t *testing.T) {
@@ -2502,9 +2604,9 @@ func TestRBG0RPMD2SwitchedBCoefficient(t *testing.T) {
 			writeVRAM16(v, 0x18102, 0x0000)
 			clear(buf)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "origin")
-			expectRGB(t, v, buf, 8, 0, 255, 0, 0, "(8,0) -> map 8 (kx unchanged)")
-			expectRGB(t, v, buf, 0, 4, 0, 0, 255, "(0,4) -> map row 8 (ky doubled)")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "origin")
+			expectRGB(t, v, buf, 8, 0, 248, 0, 0, "(8,0) -> map 8 (kx unchanged)")
+			expectRGB(t, v, buf, 0, 4, 0, 0, 248, "(0,4) -> map row 8 (ky doubled)")
 		})
 		t.Run(surf.name+" B mode 3 Xp", func(t *testing.T) {
 			v := base(t, 0x0C00)
@@ -2512,7 +2614,7 @@ func TestRBG0RPMD2SwitchedBCoefficient(t *testing.T) {
 			writeVRAM16(v, 0x18102, 0x1000)
 			clear(buf)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 0, 255, 0, "origin -> map 16")
+			expectRGB(t, v, buf, 0, 0, 0, 248, 0, "origin -> map 16")
 		})
 		t.Run(surf.name+" B per-dot bank read", func(t *testing.T) {
 			v := base(t, 0)
@@ -2524,7 +2626,7 @@ func TestRBG0RPMD2SwitchedBCoefficient(t *testing.T) {
 			writeVRAM16(v, 0x18106, 0x0000)
 			clear(buf)
 			renderTestRBG0(v, buf)
-			expectRGB(t, v, buf, 0, 0, 255, 0, 0, "dot 0")
+			expectRGB(t, v, buf, 0, 0, 248, 0, 0, "dot 0")
 			expectTransparent(t, v, buf, 1, 0, "dot 1 reads its own B entry")
 		})
 	}
@@ -2554,19 +2656,19 @@ func TestRBGScreenOverLSMD3(t *testing.T) {
 			v.regs[tc.pnc] = 0x0001
 			v.regs[tc.ovpn] = 0x1003
 			setLSMD3(v, true)
-			buf := make([]uint32, 352*256)
+			buf := make([]uint32, testFrameDots)
 			tc.render(v, buf)
 			// Field 1: line 0 is displayed line 1 (row 1: blue), line 2
 			// is displayed line 5 (row 5: red).
-			expectRGB(t, v, buf, 0, 0, 0, 0, 255, "field 1 line 0 -> tile row 1")
-			expectRGB(t, v, buf, 0, 2, 255, 0, 0, "field 1 line 2 -> tile row 5")
+			expectRGB(t, v, buf, 0, 0, 0, 0, 248, "field 1 line 0 -> tile row 1")
+			expectRGB(t, v, buf, 0, 2, 248, 0, 0, "field 1 line 2 -> tile row 5")
 			setLSMD3(v, false)
 			clear(buf)
 			tc.render(v, buf)
 			// Field 0: line 1 is displayed line 2 (row 2: blue), line 2
 			// is displayed line 4 (row 4: red).
-			expectRGB(t, v, buf, 0, 1, 0, 0, 255, "field 0 line 1 -> tile row 2")
-			expectRGB(t, v, buf, 0, 2, 255, 0, 0, "field 0 line 2 -> tile row 4")
+			expectRGB(t, v, buf, 0, 1, 0, 0, 248, "field 0 line 1 -> tile row 2")
+			expectRGB(t, v, buf, 0, 2, 248, 0, 0, "field 0 line 2 -> tile row 4")
 		})
 	}
 
@@ -2579,9 +2681,9 @@ func TestRBGScreenOverLSMD3(t *testing.T) {
 		v.regs[vdp2WPSY0] = 0
 		v.regs[vdp2WPEY0] = 1 // displayed lines 0..1
 		setLSMD3(v, true)
-		buf := make([]uint32, 352*256)
+		buf := make([]uint32, testFrameDots)
 		renderTestRBG0(v, buf)
-		expectRGB(t, v, buf, 3, 0, 0, 255, 0, "field 1 line 0 = displayed 1: inside -> B")
-		expectRGB(t, v, buf, 3, 1, 255, 0, 0, "field 1 line 1 = displayed 3: outside -> A")
+		expectRGB(t, v, buf, 3, 0, 0, 248, 0, "field 1 line 0 = displayed 1: inside -> B")
+		expectRGB(t, v, buf, 3, 1, 248, 0, 0, "field 1 line 1 = displayed 3: outside -> A")
 	})
 }

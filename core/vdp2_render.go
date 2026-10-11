@@ -3,11 +3,15 @@
 
 package core
 
-// vdp1FBView describes the VDP1 display framebuffer a line samples:
-// pixel data, format, and dimensions. A nil data slice means no
-// sprite layer. rotated is set when VDP1 is in a rotation TV mode:
-// the sprite layer samples at coordinates from rotation parameter A
-// instead of the screen position.
+import "github.com/user-none/erings/core/compute/screen"
+
+// vdp1FBView describes the VDP1 frame buffer the frame's sprite layer
+// samples: the buffer, its format, and its dimensions. A nil data
+// slice means no sprite layer. rotated is set when VDP1 is in a
+// rotation TV mode: the sprite layer samples at coordinates from
+// rotation parameter A instead of the screen position. The buffer is
+// the display buffer the frame change brought in and nothing draws
+// into it during the display.
 type vdp1FBView struct {
 	data    []byte
 	is8bpp  bool
@@ -28,8 +32,9 @@ type vdp1FBView struct {
 // Everything else refreshes per line: BeginLine re-snapshots the
 // register file and re-decodes the register-derived state when
 // registers were written, so a register write takes effect on the
-// following line. VRAM, CRAM tables, and the VDP1 framebuffer are
-// read live as spans render.
+// following line. VRAM and CRAM, the row's tables and its dots alike,
+// are read live as the row is set up and rendered, and so is the VDP1
+// frame buffer at the row's render point.
 type vdp2Frame struct {
 	disp    bool
 	width   int   // active pixels per line at frame start
@@ -51,11 +56,12 @@ type vdp2Frame struct {
 
 	// BGON bit 5 at frame start: RBG1 occupies the NBG0 slot and all
 	// NBG screens are suppressed. The composite span uses this to pick
-	// rbg1Buf vs layerBufs[0], matching what was rendered.
+	// the RBG1 or the NBG0 buffer, matching what was rendered.
 	rbg1Active bool
 
-	nbgOn [4]bool
-	nbg   [4]nbgConfig
+	nbgOn     [4]bool
+	nbg       [4]nbgConfig
+	gradLayer int // the layer buffer the gradation blurs (screen layer index), -1 for none
 
 	// Effective vertical-scroll base per NBG screen, 11.8 fixed point:
 	// base + dispY*incY gives a line's vertical position (VDP2 manual
@@ -95,6 +101,17 @@ type vdp2Frame struct {
 	// new mode yet.
 	fieldBootstrap bool
 
+	// blanked: the frame starts black, on a geometry change or with
+	// the display off. Each renderer's beginFrame blanks its own frame
+	// over the displayed rows.
+	blanked bool
+
+	// resized: the frame's width or displayed height differs from the
+	// previous frame's (a change of width, height, or effective
+	// interlace), the only point the renderers' buffer sizes change.
+	// Each renderer's beginFrame grows its buffers on it.
+	resized bool
+
 	// Composite setup: color calculation mode bits (CCCTL), per-layer
 	// RGB-format flags for extended color calculation, and the
 	// gradation target buffer (nil = gradation off). exccen has the
@@ -103,17 +120,6 @@ type vdp2Frame struct {
 	ccrtmd     bool
 	exccen     bool
 	layerIsRGB [6]bool
-	gradBuf    []uint32
-}
-
-func clampU8(v int) uint8 {
-	if v > 255 {
-		return 255
-	}
-	if v < 0 {
-		return 0
-	}
-	return uint8(v)
 }
 
 // planePages decodes a 2-bit PLSZ plane-size field into the plane
@@ -361,9 +367,9 @@ func (v *VDP2) buildRBG1Frame() rbgFrame {
 func (v *VDP2) BeginFrame() {
 	fs := &v.frame
 	prevWidth, prevHeight, prevIntl := fs.width, fs.height, fs.effIntl
-	fs.regs = v.regs
+	fs.regs = v.lineRegs(0)
 	fs.hiRes = v.hiRes
-	fs.cramMode = v.cramMode()
+	fs.cramMode = cramModeOf(&fs.regs)
 	fs.disp = fs.regs[vdp2TVMD]&0x8000 != 0
 	fs.width = int(v.activeWidth)
 	fs.height = int(v.activeLines)
@@ -379,25 +385,22 @@ func (v *VDP2) BeginFrame() {
 	// pixels written under the previous stride/height are meaningless
 	// bytes under the new one. Hardware has no persistent framebuffer
 	// (each scanline is generated during the scan), so a mode switch
-	// cannot show remnants of the previous mode. Blank the buffer so
-	// it does not show them either. Under LSMD=3 the first frame also
-	// writes both field rows (fieldBootstrap): only one field has
+	// cannot show remnants of the previous mode. The frame is blanked
+	// so it does not show them either. Under LSMD=3 the first frame
+	// also writes both field rows (fieldBootstrap): only one field has
 	// been generated in the new mode, and displaying it interleaved
 	// with blank rows would show a half-bright frame that hardware's
 	// continuous scan does not produce.
 	fs.fieldBootstrap = false
-	if fs.width != prevWidth || fs.height != prevHeight || fs.effIntl != prevIntl {
+	fs.blanked = false
+	fs.resized = fs.width != prevWidth || fs.height != prevHeight || fs.effIntl != prevIntl
+	if fs.resized {
 		fs.fieldBootstrap = fs.effIntl == 3
-		for i := 0; i < len(v.framebuffer); i += 4 {
-			v.framebuffer[i] = 0
-			v.framebuffer[i+1] = 0
-			v.framebuffer[i+2] = 0
-			v.framebuffer[i+3] = 0xFF
-		}
+		fs.blanked = true
 	}
 
 	// DISP=0: blank output and skip all render setup; BeginLine and
-	// RenderTo no-op for the frame. The manual reads BDCLMD as selecting back
+	// the row render no-op for the frame. The manual reads BDCLMD as selecting back
 	// screen color over black for the standard display area when DISP
 	// is 0, but on real hardware the analog video signal is suppressed
 	// while DISP=0, so the picture is black on screen regardless of
@@ -405,25 +408,11 @@ func (v *VDP2) BeginFrame() {
 	// transition while still mutating back-screen / palette state in
 	// VRAM - honoring BDCLMD here exposes those transient values as a
 	// 1-frame color flash that does not occur on hardware. Under
-	// LSMD=3 paint every displayed row so the screen-off state is
+	// LSMD=3 every displayed row is blanked so the screen-off state is
 	// truly blank rather than leaving stale pixels from the prior
 	// field visible.
 	if !fs.disp {
-		stride := fs.width * 4
-		displayRows := fs.height
-		if fs.effIntl == 3 {
-			displayRows = fs.height * 2
-		}
-		for row := 0; row < displayRows; row++ {
-			off := row * stride
-			for x := 0; x < fs.width; x++ {
-				v.framebuffer[off] = 0
-				v.framebuffer[off+1] = 0
-				v.framebuffer[off+2] = 0
-				v.framebuffer[off+3] = 0xFF
-				off += 4
-			}
-		}
+		fs.blanked = true
 		return
 	}
 
@@ -504,16 +493,43 @@ func (v *VDP2) BeginFrame() {
 
 	// Force the line-state decode at the frame's first BeginLine.
 	v.regsDirty = true
+	v.forceDecode = true
+}
+
+// lineRegs returns the registers row y renders with: the record the
+// raster timebase captured as line y began under regCapture, else
+// the live registers.
+func (v *VDP2) lineRegs(y int) [vdp2RegCount]uint16 {
+	if v.regCapture && y < len(v.regLines) {
+		return v.regLines[y]
+	}
+	return v.regs
+}
+
+// lineRegsDirty reports whether row y needs the line state decoded:
+// a register write during the line before under regCapture, else
+// the live dirty flag, which it consumes.
+func (v *VDP2) lineRegsDirty(y int) bool {
+	if v.regCapture && y < len(v.regLines) {
+		return v.regDirtyLine[y]
+	}
+	d := v.regsDirty
+	v.regsDirty = false
+	return d
+}
+
+// cramModeOf is the CRAM mode from a register block's RAMCTL bits
+// 13:12.
+func cramModeOf(regs *[vdp2RegCount]uint16) uint8 {
+	return uint8((regs[vdp2RAMCTL] >> 12) & 0x03)
 }
 
 // decodeLineState re-decodes the register-derived line state from the
-// current register snapshot: the window mask cache, NBG layer enables
-// and configurations, and the composite setup.
+// current register snapshot: NBG layer enables and configurations, and
+// the composite setup.
 func (v *VDP2) decodeLineState() {
 	fs := &v.frame
-
-	v.winMaskValid = false
-	v.buildWindowMaskCache()
+	v.buildCRAMCache()
 
 	// When RBG1 is enabled, all NBG screens are disabled.
 	if fs.rbg1Active {
@@ -594,7 +610,7 @@ func (v *VDP2) decodeLineState() {
 
 	// Gradation calculation: horizontal blur on designated screen.
 	// Normal TV mode + CRAM mode 0 only.
-	fs.gradBuf = nil
+	fs.gradLayer = -1
 	boken := ccctl&0x8000 != 0 // bit 15
 	if boken && (fs.hiRes || fs.cramMode != 0) {
 		boken = false
@@ -608,19 +624,18 @@ func (v *VDP2) decodeLineState() {
 		// live per pixel from the VDP1 framebuffer during compositing.
 		// Values 3 and 7 are invalid per the manual Sec 12.2 table.
 		case 1: // RBG0
-			fs.gradBuf = v.rbg0Buf
+			fs.gradLayer = screen.LayerRBG0
 		case 2: // NBG0 (or RBG1 when active)
+			fs.gradLayer = screen.LayerNBG0
 			if fs.rbg1Active {
-				fs.gradBuf = v.rbg1Buf
-			} else {
-				fs.gradBuf = v.layerBufs[0]
+				fs.gradLayer = screen.LayerRBG1
 			}
 		case 4: // NBG1 (or EXBG)
-			fs.gradBuf = v.layerBufs[1]
+			fs.gradLayer = screen.LayerNBG1
 		case 5: // NBG2
-			fs.gradBuf = v.layerBufs[2]
+			fs.gradLayer = screen.LayerNBG2
 		case 6: // NBG3
-			fs.gradBuf = v.layerBufs[3]
+			fs.gradLayer = screen.LayerNBG3
 		}
 	}
 }
@@ -629,130 +644,162 @@ func (v *VDP2) decodeLineState() {
 // (writes since the previous line take effect from this row), rebuilds
 // the CRAM cache if CRAM was written, re-decodes the register-derived
 // line state if registers were written, and builds the row's span
-// renderer chain - enabled layers, gradation, composite - with each
-// renderer's per-line setup (line scroll tables, rotation per-line
-// stepping, back-screen color) done here. fb is the VDP1 display
-// framebuffer view the row's sprite layer samples.
+// chain - enabled layers, gradation, composite - into the row's
+// record, with each layer's per-line setup (line scroll tables,
+// rotation per-line stepping, back-screen color) done here. fb is the
+// VDP1 display framebuffer view the row's sprite layer samples.
 func (v *VDP2) BeginLine(y int, fb vdp1FBView) {
 	fs := &v.frame
 	v.lineFB = fb
-	v.lineSpanX = 0
-	v.lineNSpans = 0
-	v.lineActive = fs.disp && y >= 0 && y < fs.height
+	v.lineY = y
+	v.lineActive = fs.disp && y >= 0 && y < fs.height && y < rowRecordMax
 	if !v.lineActive {
+		if y >= 0 && y < rowRecordMax {
+			v.rowRecord(y).NSpans = 0
+		}
 		return
 	}
 
-	fs.regs = v.regs
-	fs.cramMode = v.cramMode()
+	fs.regs = v.lineRegs(y)
+	fs.cramMode = cramModeOf(&fs.regs)
+	if v.cramCacheValid && uint32(fs.cramMode) != v.cramCacheMode {
+		// The mode change reached this row's registers; the palette
+		// was built for the previous mode.
+		v.cramCacheValid = false
+	}
 	v.buildCRAMCache()
-	if v.regsDirty {
-		v.regsDirty = false
+	if v.lineRegsDirty(y) || v.forceDecode {
+		v.forceDecode = false
 		v.decodeLineState()
 	}
+	v.rebaseSCYN(y)
+	v.setupSpriteRotation(y, fb)
 
-	// Mid-display SCYN writes, effective from line y after a write
-	// during line y-1. The two screen classes differ:
-	//
-	// NBG0/NBG1 evaluate the VDP2 manual Sec 5.2 display coordinate
-	// formula (coordinate increment Y x V counter value + screen
-	// scroll value Y) against the free-running V counter, so a write
-	// replaces the scroll-value term. Remaining lines shift by the
-	// value delta, and rewriting an unchanged value has no effect.
-	//
-	// NBG2/NBG3 have no zoom datapath. Their vertical position is a
-	// line counter that a write reloads, and line y displays the
-	// written row verbatim. Rebase so base + dispY*0x100 yields the
-	// written row at line y.
-	if y > 0 && y-1 < len(v.scynSet) {
-		dispY := int32(y)
-		if fs.lsmd3 {
-			dispY = int32(y*2 + fs.field)
-		}
-		for s := 0; s < 4; s++ {
-			if !v.scynSet[y-1][s] {
-				continue
-			}
-			if s < 2 {
-				fs.nbgYBaseFP[s] = v.scynRec[y-1][s]
-			} else {
-				fs.nbgYBaseFP[s] = v.scynRec[y-1][s] - dispY*0x100
-			}
-		}
-	}
-
-	// Sprite framebuffer rotated read: this line's read coordinate is
-	// Xst + dXst*Vcnt, not the full rotation matrix pipeline - per
-	// VDP1 manual Sec 1.2 only the read start coordinates and movement
-	// values are received from the VDP2. RPRCTL Xst/Yst arms re-read
-	// and rebase the advance as in the RBG0 span setup.
-	v.lineSprRot.enabled = fb.rotated
-	if fb.rotated {
-		vcnt := int64(y)
-		if fs.lsmd3 {
-			vcnt = int64(y*2 + fs.field)
-		}
-		arm := v.rotArmBits(y)
-		if arm&0x01 != 0 {
-			fs.sprRotA.xst = signExtendFP(v.readVRAM16(fs.sprRotBase+0x00), v.readVRAM16(fs.sprRotBase+0x02), 12)
-			fs.sprRotLastVcntX = vcnt
-		}
-		if arm&0x02 != 0 {
-			fs.sprRotA.yst = signExtendFP(v.readVRAM16(fs.sprRotBase+0x04), v.readVRAM16(fs.sprRotBase+0x06), 12)
-			fs.sprRotLastVcntY = vcnt
-		}
-		v.lineSprRot.baseX = fs.sprRotA.xst + fs.sprRotA.dxst*(vcnt-fs.sprRotLastVcntX)
-		v.lineSprRot.baseY = fs.sprRotA.yst + fs.sprRotA.dyst*(vcnt-fs.sprRotLastVcntY)
-		v.lineSprRot.dx = fs.sprRotA.dx
-		v.lineSprRot.dy = fs.sprRotA.dy
-	}
-
+	r := v.rowRecord(y)
 	n := 0
 	for s := 0; s < 4; s++ {
 		if fs.nbgOn[s] {
-			v.lineSpans[n] = v.nbgSpanSetup(v.layerBufs[s], &fs.nbg[s], s, y)
+			v.nbgSpanSetup(&fs.nbg[s], s, y)
+			entry := entryNBGCell
+			if r.NBG[s].Screen.Bitmap {
+				entry = entryNBGBitmap
+			}
+			r.Spans[n] = spanWord(entry, s)
 			n++
 		}
 	}
 	if fs.exbgOn {
-		v.lineSpans[n] = v.exbgSpanSetup(v.layerBufs[1], y)
+		// The external image row is an input each renderer writes
+		// into its own NBG1 buffer (exbgCopyRow).
+		r.Spans[n] = spanWord(entryExternal, screen.LayerNBG1)
 		n++
 	}
 	if fs.rbg0On {
-		// The line color buffer's per-pixel writes are conditional on
-		// coefficient state; clear the row so unwritten pixels read as
-		// no-line-color rather than stale data.
-		row := y * fs.width
-		clear(v.rbg0LCBuf[row : row+fs.width])
-		v.lineSpans[n] = v.rbg0SpanSetup(v.rbg0Buf, &fs.rbg0, &fs.rbg0F, y)
+		v.rbg0SpanSetup(&fs.rbg0, &fs.rbg0F, y)
+		r.Spans[n] = spanWord(rbgEntry(&r.RBG[0]), screen.LayerRBG0)
 		n++
 	}
 	if fs.rbg1On {
-		row := y * fs.width
-		clear(v.rbg1LCBuf[row : row+fs.width])
-		v.lineSpans[n] = v.rbg1SpanSetup(v.rbg1Buf, &fs.rbg1, &fs.rbg1F, y)
+		v.rbg1SpanSetup(&fs.rbg1, &fs.rbg1F, y)
+		r.Spans[n] = spanWord(rbgEntry(&r.RBG[1]), screen.LayerRBG1)
 		n++
 	}
-	if fs.gradBuf != nil {
-		v.lineSpans[n] = gradationSpanSetup(fs.gradBuf, fs.width, y)
+	if fs.gradLayer >= 0 {
+		r.Grad = screen.GradationParams{Y: int32(y), Width: int32(fs.width), Step: 1}
+		r.Spans[n] = spanWord(entryGradation, fs.gradLayer)
 		n++
 	}
-	v.lineSpans[n] = v.compositeSpanSetup(y)
+	v.compositeSpanSetup(y)
+	r.Spans[n] = spanWord(entryComposite, 0)
 	n++
-	v.lineNSpans = n
+	r.NSpans = uint32(n)
 }
 
-// exbgSpanSetup prepares row y of the EXBG external-image screen: the
-// latched frame's row is copied into the NBG1 layer buffer as direct
-// RGB with the screen priority (and color-calculation flag) packed per
-// pixel. Pixels outside the frame are transparent. The $A1 display
+// rebaseSCYN applies the mid-display SCYN writes recorded during line
+// y-1, effective from line y. The two screen classes differ:
+//
+// NBG0/NBG1 evaluate the VDP2 manual Sec 5.2 display coordinate
+// formula (coordinate increment Y x V counter value + screen scroll
+// value Y) against the free-running V counter, so a write replaces
+// the scroll-value term. Remaining lines shift by the value delta,
+// and rewriting an unchanged value has no effect.
+//
+// NBG2/NBG3 have no zoom datapath. Their vertical position is a line
+// counter that a write reloads, and line y displays the written row
+// verbatim. Rebase so base + dispY*0x100 yields the written row at
+// line y.
+func (v *VDP2) rebaseSCYN(y int) {
+	if y == 0 || y-1 >= len(v.scynSet) {
+		return
+	}
+	fs := &v.frame
+	dispY := int32(y)
+	if fs.lsmd3 {
+		dispY = int32(y*2 + fs.field)
+	}
+	for s := 0; s < 4; s++ {
+		if !v.scynSet[y-1][s] {
+			continue
+		}
+		if s < 2 {
+			fs.nbgYBaseFP[s] = v.scynRec[y-1][s]
+		} else {
+			fs.nbgYBaseFP[s] = v.scynRec[y-1][s] - dispY*0x100
+		}
+	}
+}
+
+// setupSpriteRotation prepares the sprite framebuffer rotated read
+// for line y: the line's read coordinate is Xst + dXst*Vcnt, not the
+// full rotation matrix pipeline - per VDP1 manual Sec 1.2 only the
+// read start coordinates and movement values are received from the
+// VDP2. RPRCTL Xst/Yst arms re-read and rebase the advance as in the
+// RBG0 span setup.
+func (v *VDP2) setupSpriteRotation(y int, fb vdp1FBView) {
+	v.lineSprRot.enabled = fb.rotated
+	if !fb.rotated {
+		return
+	}
+	fs := &v.frame
+	vcnt := int64(y)
+	if fs.lsmd3 {
+		vcnt = int64(y*2 + fs.field)
+	}
+	arm := v.rotArmBits(y)
+	if arm&0x01 != 0 {
+		fs.sprRotA.xst = signExtendFP(v.readVRAM16(fs.sprRotBase+0x00), v.readVRAM16(fs.sprRotBase+0x02), 12)
+		fs.sprRotLastVcntX = vcnt
+	}
+	if arm&0x02 != 0 {
+		fs.sprRotA.yst = signExtendFP(v.readVRAM16(fs.sprRotBase+0x04), v.readVRAM16(fs.sprRotBase+0x06), 12)
+		fs.sprRotLastVcntY = vcnt
+	}
+	v.lineSprRot.baseX = fs.sprRotA.xst + fs.sprRotA.dxst*(vcnt-fs.sprRotLastVcntX)
+	v.lineSprRot.baseY = fs.sprRotA.yst + fs.sprRotA.dyst*(vcnt-fs.sprRotLastVcntY)
+	v.lineSprRot.dx = fs.sprRotA.dx
+	v.lineSprRot.dy = fs.sprRotA.dy
+}
+
+// exbgCopyRow writes row y of the EXBG external-image screen into row
+// slot of buf, an NBG1 layer buffer whose rows are the frame's width: the
+// latched frame's row as direct RGB with the screen priority (and
+// color-calculation flag) packed per pixel. Pixels outside the frame
+// are transparent. The $A1 display
 // window places the picture: the latched placement (already in frame
 // coordinates) gives the position and visible extent, and the
 // frame-buffer position and ratio anchor and step the source
 // (nearest-neighbor). Without a configured window the frame maps 1:1
 // from the screen origin. The $A2-$A4 output controls are not
 // applied.
-func (v *VDP2) exbgSpanSetup(buf []uint32, y int) func(x0, x1 int) {
+//
+// At a scale shift above 0 it writes sub-row k of row y into row slot
+// of a buffer whose rows are N times the frame's width (N = 1 <<
+// shift). The placement is the native row's; each sub-dot and sub-row
+// samples the video at its own position, the native step divided by
+// N, so the sub-dot at a block corner reads the native dot's video
+// pixel. At shift 0 it is the native row.
+func (v *VDP2) exbgCopyRow(buf []uint32, slot, y, k int, shift uint32) {
+	n := 1 << shift
 	width := v.frame.width
 	base := uint32(v.frame.exbgPri) << 24
 	if v.frame.exbgCC {
@@ -771,7 +818,7 @@ func (v *VDP2) exbgSpanSetup(buf []uint32, y int) func(x0, x1 int) {
 		ratX = v.exbgRatX
 		srcY = -1
 		if y >= v.exbgDY && y < v.exbgDY+v.exbgDH {
-			srcY = v.exbgSY + (y-v.exbgDY)*v.exbgRatY/1000
+			srcY = v.exbgSY + (n*(y-v.exbgDY)+k)*v.exbgRatY/(n*1000)
 		}
 	}
 	var src []uint32
@@ -782,67 +829,35 @@ func (v *VDP2) exbgSpanSetup(buf []uint32, y int) func(x0, x1 int) {
 		srcX -= wx0 * ratX / 1000
 		wx0 = 0
 	}
-	row := y * width
-	return func(x0, x1 int) {
-		// Clamp the span to the visible picture region; everything
-		// else on the row (including window pixels past the source
-		// row's end) is transparent.
-		lo, hi := x0, x1
-		if lo < wx0 {
-			lo = wx0
-		}
-		if hi > wx1 {
-			hi = wx1
-		}
-		if hi < lo {
-			lo, hi = x0, x0
-		}
-		for x := x0; x < lo; x++ {
-			buf[row+x] = 0
-		}
-		for x := lo; x < hi; x++ {
-			sx := srcX + (x-wx0)*ratX/1000
-			if sx >= 0 && sx < len(src) {
-				buf[row+x] = base | src[sx]
-			} else {
-				buf[row+x] = 0
-			}
-		}
-		for x := hi; x < x1; x++ {
+	// Clamp to the visible picture region; everything else on the
+	// row (including window pixels past the source row's end) is
+	// transparent.
+	lo, hi := 0, width
+	if lo < wx0 {
+		lo = wx0
+	}
+	if hi > wx1 {
+		hi = wx1
+	}
+	if hi < lo {
+		lo, hi = 0, 0
+	}
+	width, lo, hi, wx0 = width*n, lo*n, hi*n, wx0*n
+	row := slot * width
+	for x := 0; x < lo; x++ {
+		buf[row+x] = 0
+	}
+	for x := lo; x < hi; x++ {
+		sx := srcX + (x-wx0)*ratX/(n*1000)
+		if sx >= 0 && sx < len(src) {
+			buf[row+x] = base | src[sx]
+		} else {
 			buf[row+x] = 0
 		}
 	}
-}
-
-// RenderTo renders the prepared row's pixels up to x (exclusive),
-// continuing from the previous RenderTo call: each span renderer in
-// the line's chain advances through [lineSpanX, x). Layer pixels and
-// VRAM table data are read at call time, so writes landing between
-// calls are visible to the row's later pixels.
-func (v *VDP2) RenderTo(x int) {
-	if !v.lineActive {
-		return
+	for x := hi; x < width; x++ {
+		buf[row+x] = 0
 	}
-	if x > v.frame.width {
-		x = v.frame.width
-	}
-	x0 := v.lineSpanX
-	if x <= x0 {
-		return
-	}
-	v.lineSpanX = x
-	for i := 0; i < v.lineNSpans; i++ {
-		v.lineSpans[i](x0, x)
-	}
-}
-
-// RenderLine produces the complete framebuffer row y in one call:
-// BeginLine plus a full-width RenderTo. A row writes only the layer
-// buffers, the RBG line-color buffers, and framebuffer row
-// frameOutRow(y).
-func (v *VDP2) RenderLine(y int, fb vdp1FBView) {
-	v.BeginLine(y, fb)
-	v.RenderTo(v.frame.width)
 }
 
 // frameOutRow maps a field-line index (0..height-1) to the framebuffer
@@ -854,7 +869,3 @@ func (v *VDP2) frameOutRow(y int) int {
 	}
 	return y
 }
-
-// FrameFieldBit returns the field bit latched by BeginFrame: the
-// parity of the field being rendered this frame.
-func (v *VDP2) FrameFieldBit() int { return v.frame.field }

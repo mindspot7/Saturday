@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/user-none/erings/core/compute/draw"
 	"hash/crc32"
 	"math"
 	"strings"
@@ -103,12 +104,9 @@ type fieldWriter struct {
 	b []byte
 }
 
-// hdr writes a field header (name length, name, data size). Field names
-// are compile-time constants; an invalid one is a programming error.
+// hdr writes a field header (name length, name, data size). Field
+// names are compile-time constants, each under 256 bytes.
 func (w *fieldWriter) hdr(name string, size int) {
-	if len(name) == 0 || len(name) > 255 {
-		panic("savestate: invalid field name: " + name)
-	}
 	w.b = append(w.b, uint8(len(name)))
 	w.b = append(w.b, name...)
 	w.b = binary.BigEndian.AppendUint32(w.b, uint32(size))
@@ -203,22 +201,100 @@ func (w *fieldWriter) flags(name string, vs []bool) {
 	}
 }
 
-// ddaEdge and gouraudStepper are embedded in the VDP1 resume structs;
+// The DDA edge and the Gouraud stepper are embedded in the VDP1 resume structs;
 // their fields are written with a caller-supplied name prefix.
-func (w *fieldWriter) ddaEdge(prefix string, e *ddaEdge) {
-	w.i64(prefix+".x", e.x)
-	w.i64(prefix+".y", e.y)
-	w.i64(prefix+".dx", e.dx)
-	w.i64(prefix+".dy", e.dy)
+func (w *fieldWriter) ddaEdge(prefix string, e *draw.DDAEdge) {
+	w.i64(prefix+".x", e.X)
+	w.i64(prefix+".y", e.Y)
+	w.i64(prefix+".dx", e.DX)
+	w.i64(prefix+".dy", e.DY)
 }
 
-func (w *fieldWriter) gouraud(prefix string, g *gouraudStepper) {
-	w.i64(prefix+".r", int64(g.r))
-	w.i64(prefix+".g", int64(g.g))
-	w.i64(prefix+".b", int64(g.b))
-	w.i64(prefix+".dr", int64(g.dr))
-	w.i64(prefix+".dg", int64(g.dg))
-	w.i64(prefix+".db", int64(g.db))
+func (w *fieldWriter) gouraud(prefix string, g *draw.GouraudStepper) {
+	w.i64(prefix+".r", int64(g.R))
+	w.i64(prefix+".g", int64(g.G))
+	w.i64(prefix+".b", int64(g.B))
+	w.i64(prefix+".dr", int64(g.DR))
+	w.i64(prefix+".dg", int64(g.DG))
+	w.i64(prefix+".db", int64(g.DB))
+}
+
+// drawOp writes a draw op's fields with a name prefix.
+func (w *fieldWriter) drawOp(prefix string, op *draw.DrawOp) {
+	w.u32(prefix+".kind", op.Kind)
+	w.u32(prefix+".addr", op.Addr)
+	p := &op.Pixel
+	w.u32(prefix+".pixel.cc", p.CC)
+	w.u32(prefix+".pixel.msbOn", p.MSBOn)
+	w.u32(prefix+".pixel.mesh", p.Mesh)
+	w.u32(prefix+".pixel.userClip", p.UserClip)
+	w.i32(prefix+".pixel.ucx1", p.UCX1)
+	w.i32(prefix+".pixel.ucy1", p.UCY1)
+	w.i32(prefix+".pixel.ucx2", p.UCX2)
+	w.i32(prefix+".pixel.ucy2", p.UCY2)
+	w.i32(prefix+".pixel.clipX", p.ClipX)
+	w.i32(prefix+".pixel.clipY", p.ClipY)
+	w.u32(prefix+".pixel.die", p.DIE)
+	w.u32(prefix+".pixel.dilOdd", p.DILOdd)
+	w.u32(prefix+".pixel.is8bpp", flag32(p.Is8bpp))
+	w.i32(prefix+".pixel.fbWidth", p.FBWidth)
+	w.i32(prefix+".pixel.fbHeight", p.FBHeight)
+	w.u32(prefix+".pixel.scaleShift", p.ScaleShift)
+	w.u32(prefix+".charAddr", op.CharAddr)
+	w.i32(prefix+".charW", op.CharW)
+	w.i32(prefix+".charH", op.CharH)
+	w.u32(prefix+".colorMode", op.ColorMode)
+	w.u32(prefix+".color", op.Color)
+	w.u32(prefix+".flags", op.Flags)
+	w.i32s(prefix+".x", op.X[:])
+	w.i32s(prefix+".y", op.Y[:])
+	w.u32s(prefix+".gouraud", op.Gouraud[:])
+}
+
+// spriteRow, quadLine, and segment write the span states of the VDP1
+// resume structs with a name prefix.
+func (w *fieldWriter) spriteRow(prefix string, st *draw.SpriteRow) {
+	w.i32(prefix+".x", st.X)
+	w.i32(prefix+".end", st.End)
+	w.i32(prefix+".endCodes", st.EC.Count)
+	w.i32(prefix+".lastEndColumn", st.EC.Last)
+	w.i32(prefix+".srcReadX", st.SrcReadX)
+}
+
+func (w *fieldWriter) quadLine(prefix string, st *draw.QuadLine) {
+	w.i32(prefix+".lx", st.LX)
+	w.i32(prefix+".ly", st.LY)
+	w.i32(prefix+".rx", st.RX)
+	w.i32(prefix+".ry", st.RY)
+	w.i32(prefix+".len", st.Len)
+	w.i32(prefix+".j", st.J)
+	w.i32(prefix+".jEnd", st.JEnd)
+	w.i64(prefix+".dpx", st.DPX)
+	w.i64(prefix+".dpy", st.DPY)
+	w.i32(prefix+".uStart", st.UStart)
+	w.i32(prefix+".du", st.DU)
+	w.u32(prefix+".rowBase", st.RowBase)
+	w.i32(prefix+".endCodes", st.EC.Count)
+	w.i32(prefix+".lastEndColumn", st.EC.Last)
+	w.i32(prefix+".srcReadU", st.SrcReadU)
+	w.flag(prefix+".hssShrink", st.HSSShrink)
+	w.flag(prefix+".checkEcd", st.CheckECD)
+	w.flag(prefix+".simple", st.Simple)
+	w.gouraud(prefix+".gouraud", &st.Gouraud)
+}
+
+func (w *fieldWriter) segment(prefix string, st *draw.Segment) {
+	w.i32(prefix+".x1", st.X1)
+	w.i32(prefix+".y1", st.Y1)
+	w.i32(prefix+".dx", st.DX)
+	w.i32(prefix+".dy", st.DY)
+	w.i32(prefix+".sx", st.SX)
+	w.i32(prefix+".sy", st.SY)
+	w.i32(prefix+".i", st.I)
+	w.i32(prefix+".iMax", st.IMax)
+	w.flag(prefix+".xMajor", st.XMajor)
+	w.u32(prefix+".gStart", st.GStart)
+	w.u32(prefix+".gEnd", st.GEnd)
 }
 
 func (w *fieldWriter) vdp1Cmd(prefix string, c *vdp1Command) {
@@ -239,32 +315,17 @@ func (w *fieldWriter) vdp1Cmd(prefix string, c *vdp1Command) {
 	w.u16(prefix+".grda", c.grda)
 }
 
-// appendChunk frames one chunk: fixed 16-byte zero-filled ASCII tag,
-// u32 payload length, payload. Tags are compile-time constants; an
-// invalid one is a programming error.
-func appendChunk(out []byte, tag string, payload []byte) []byte {
-	if len(tag) == 0 || len(tag) >= stateTagLen {
-		panic("savestate: invalid chunk tag: " + tag)
-	}
-	var t [stateTagLen]byte
-	copy(t[:], tag)
-	out = append(out, t[:]...)
-	out = binary.BigEndian.AppendUint32(out, uint32(len(payload)))
-	return append(out, payload...)
-}
-
-// chunkAssembler frames chunks directly into one shared buffer: tag,
-// a length placeholder backfilled after the builder runs, then the
-// builder's field records appended in place. No per-chunk intermediate
-// allocation - Serialize reuses the underlying buffer across calls.
+// chunkAssembler frames chunks directly into one shared buffer: a
+// fixed 16-byte zero-filled ASCII tag, a length placeholder
+// backfilled after the builder runs, then the builder's field records
+// appended in place. No per-chunk intermediate allocation - Serialize
+// reuses the underlying buffer across calls. Tags are compile-time
+// constants, each shorter than the tag field.
 type chunkAssembler struct {
 	b []byte
 }
 
 func (a *chunkAssembler) chunk(tag string, build func(*fieldWriter)) {
-	if len(tag) == 0 || len(tag) >= stateTagLen {
-		panic("savestate: invalid chunk tag: " + tag)
-	}
 	var t [stateTagLen]byte
 	copy(t[:], tag)
 	a.b = append(a.b, t[:]...)
@@ -590,179 +651,17 @@ func buildVDP1Resume(w *fieldWriter, v *VDP1) {
 	w.i64("cmdPhase", int64(v.cmdPhase))
 	w.vdp1Cmd("snap", &v.cmdSnapshot)
 
-	sr := &v.spriteResume
-	w.u32("sprite.charAddr", sr.charAddr)
-	w.i64("sprite.charW", int64(sr.charW))
-	w.i64("sprite.charH", int64(sr.charH))
-	w.u16("sprite.colorMode", sr.colorMode)
-	w.u16("sprite.cc", sr.cc)
-	w.flag("sprite.ecdOff", sr.ecdOff)
-	w.flag("sprite.spdOn", sr.spdOn)
-	w.flag("sprite.msbOn", sr.msbOn)
-	w.flag("sprite.mesh", sr.mesh)
-	w.u16("sprite.userClip", sr.userClip)
-	w.flag("sprite.flipH", sr.flipH)
-	w.flag("sprite.flipV", sr.flipV)
-	w.i64("sprite.drawX", int64(sr.drawX))
-	w.i64("sprite.drawY", int64(sr.drawY))
-	w.i64("sprite.clipX", int64(sr.clipX))
-	w.i64("sprite.clipY", int64(sr.clipY))
-	w.u16s("sprite.gt", sr.gt[:])
-	w.flag("sprite.isScaled", sr.isScaled)
-	w.i64("sprite.destW", int64(sr.destW))
-	w.i64("sprite.destH", int64(sr.destH))
-	w.i64("sprite.dstX1", int64(sr.dstX1))
-	w.i64("sprite.dstY1", int64(sr.dstY1))
-	w.flag("sprite.effFlipH", sr.effFlipH)
-	w.flag("sprite.effFlipV", sr.effFlipV)
-	w.flag("sprite.hssShrinkX", sr.hssShrinkX)
-	w.flag("sprite.hssOddParity", sr.hssOddParity)
-	w.flag("sprite.hssEcdOff", sr.hssEcdOff)
-	w.i64("sprite.outerIdx", int64(sr.outerIdx))
-	w.i64("sprite.innerIdx", int64(sr.innerIdx))
-	w.i64("sprite.endCodeCount", int64(sr.endCodeCount))
-	w.i64("sprite.prevSrcX", int64(sr.prevSrcX))
-	w.i64("sprite.srcReadX", int64(sr.srcReadX))
-
-	dr := &v.distortedResume
-	w.u32("dist.charAddr", dr.charAddr)
-	w.i64("dist.charW", int64(dr.charW))
-	w.i64("dist.charH", int64(dr.charH))
-	w.u16("dist.colorMode", dr.colorMode)
-	w.u16("dist.cc", dr.cc)
-	w.flag("dist.ecdOff", dr.ecdOff)
-	w.flag("dist.spdOn", dr.spdOn)
-	w.flag("dist.msbOn", dr.msbOn)
-	w.flag("dist.mesh", dr.mesh)
-	w.u16("dist.userClip", dr.userClip)
-	w.flag("dist.hss", dr.hss)
-	w.flag("dist.hssOdd", dr.hssOdd)
-	w.flag("dist.hssShrinkU", dr.hssShrinkU)
-	w.flag("dist.flipH", dr.flipH)
-	w.flag("dist.flipV", dr.flipV)
-	w.i64("dist.bboxMinX", int64(dr.bboxMinX))
-	w.i64("dist.bboxMinY", int64(dr.bboxMinY))
-	w.i64("dist.bboxMaxX", int64(dr.bboxMaxX))
-	w.i64("dist.bboxMaxY", int64(dr.bboxMaxY))
-	w.i64("dist.clipX", int64(dr.clipX))
-	w.i64("dist.clipY", int64(dr.clipY))
-	w.i64("dist.ax", int64(dr.ax))
-	w.i64("dist.ay", int64(dr.ay))
-	w.i64("dist.bx", int64(dr.bx))
-	w.i64("dist.by", int64(dr.by))
-	w.i64("dist.cx", int64(dr.cx))
-	w.i64("dist.cy", int64(dr.cy))
-	w.i64("dist.dx", int64(dr.dx))
-	w.i64("dist.dy", int64(dr.dy))
-	w.i64("dist.dmax", int64(dr.dmax))
-	w.i64("dist.rowStride", int64(dr.rowStride))
-	w.flag("dist.bpp8", dr.bpp8)
-	w.flag("dist.simpleMode", dr.simpleMode)
-	w.u16s("dist.gt", dr.gt[:])
-	w.flag("dist.checkEcd", dr.checkEcd)
-	w.u16("dist.colr", dr.colr)
-	w.i64("dist.uStart", int64(dr.uStart))
-	w.i64("dist.uEnd", int64(dr.uEnd))
-	w.i64("dist.dvFP", int64(dr.dvFP))
-	w.ddaEdge("dist.leftEdge", &dr.leftEdge)
-	w.ddaEdge("dist.rightEdge", &dr.rightEdge)
-	w.gouraud("dist.gsOuterLeft", &dr.gsOuterLeft)
-	w.gouraud("dist.gsOuterRight", &dr.gsOuterRight)
-	w.i64("dist.vFP", int64(dr.vFP))
-	w.i64("dist.outerI", int64(dr.outerI))
-	w.i64("dist.innerJ", int64(dr.innerJ))
-	w.i64("dist.curLx", int64(dr.curLx))
-	w.i64("dist.curLy", int64(dr.curLy))
-	w.i64("dist.curRx", int64(dr.curRx))
-	w.i64("dist.curRy", int64(dr.curRy))
-	w.u32("dist.rowBase", dr.rowBase)
-	w.i64("dist.lineDx", int64(dr.lineDx))
-	w.i64("dist.lineDy", int64(dr.lineDy))
-	w.i64("dist.lineLen", int64(dr.lineLen))
-	w.i64("dist.jEnd", int64(dr.jEnd))
-	w.i64("dist.pxFP", dr.pxFP)
-	w.i64("dist.pyFP", dr.pyFP)
-	w.i64("dist.dpxFP", dr.dpxFP)
-	w.i64("dist.dpyFP", dr.dpyFP)
-	w.i64("dist.uFP", int64(dr.uFP))
-	w.i64("dist.duFP", int64(dr.duFP))
-	w.i64("dist.prevPx", int64(dr.prevPx))
-	w.i64("dist.prevPy", int64(dr.prevPy))
-	w.i64("dist.endCodeCount", int64(dr.endCodeCount))
-	w.i64("dist.srcReadU", int64(dr.srcReadU))
-	w.gouraud("dist.gsLine", &dr.gsLine)
-
-	pr := &v.polygonResume
-	w.u16("poly.color", pr.color)
-	w.u16("poly.cc", pr.cc)
-	w.flag("poly.msbOn", pr.msbOn)
-	w.flag("poly.mesh", pr.mesh)
-	w.u16("poly.userClip", pr.userClip)
-	w.i64("poly.clipX", int64(pr.clipX))
-	w.i64("poly.clipY", int64(pr.clipY))
-	w.flag("poly.simpleMode", pr.simpleMode)
-	w.u16s("poly.gt", pr.gt[:])
-	w.i64("poly.ax", int64(pr.ax))
-	w.i64("poly.ay", int64(pr.ay))
-	w.i64("poly.bx", int64(pr.bx))
-	w.i64("poly.by", int64(pr.by))
-	w.i64("poly.cx", int64(pr.cx))
-	w.i64("poly.cy", int64(pr.cy))
-	w.i64("poly.dx", int64(pr.dx))
-	w.i64("poly.dy", int64(pr.dy))
-	w.i64("poly.dmax", int64(pr.dmax))
-	w.ddaEdge("poly.leftEdge", &pr.leftEdge)
-	w.ddaEdge("poly.rightEdge", &pr.rightEdge)
-	w.gouraud("poly.gsOuterLeft", &pr.gsOuterLeft)
-	w.gouraud("poly.gsOuterRight", &pr.gsOuterRight)
-	w.gouraud("poly.gsLine", &pr.gsLine)
-	w.i64("poly.outerI", int64(pr.outerI))
-	w.i64("poly.innerJ", int64(pr.innerJ))
-	w.i64("poly.curLx", int64(pr.curLx))
-	w.i64("poly.curLy", int64(pr.curLy))
-	w.i64("poly.curRx", int64(pr.curRx))
-	w.i64("poly.curRy", int64(pr.curRy))
-	w.i64("poly.lineDx", int64(pr.lineDx))
-	w.i64("poly.lineDy", int64(pr.lineDy))
-	w.i64("poly.lineLen", int64(pr.lineLen))
-	w.i64("poly.jEnd", int64(pr.jEnd))
-	w.i64("poly.pxFP", pr.pxFP)
-	w.i64("poly.pyFP", pr.pyFP)
-	w.i64("poly.dpxFP", pr.dpxFP)
-	w.i64("poly.dpyFP", pr.dpyFP)
-	w.i64("poly.prevPx", int64(pr.prevPx))
-	w.i64("poly.prevPy", int64(pr.prevPy))
-
-	lr := &v.lineResume
-	w.u16("line.color", lr.color)
-	w.u16("line.cc", lr.cc)
-	w.flag("line.msbOn", lr.msbOn)
-	w.flag("line.mesh", lr.mesh)
-	w.u16("line.userClip", lr.userClip)
-	w.i64("line.clipX", int64(lr.clipX))
-	w.i64("line.clipY", int64(lr.clipY))
-	w.u16("line.gStart", lr.gStart)
-	w.u16("line.gEnd", lr.gEnd)
-	w.i64("line.x", int64(lr.x))
-	w.i64("line.y", int64(lr.y))
-	w.i64("line.dx", int64(lr.dx))
-	w.i64("line.dy", int64(lr.dy))
-	w.i64("line.sx", int64(lr.sx))
-	w.i64("line.sy", int64(lr.sy))
-	w.i64("line.err", int64(lr.err))
-	w.i64("line.iter", int64(lr.iter))
-	w.i64("line.iterMax", int64(lr.iterMax))
-	w.flag("line.xMajor", lr.xMajor)
-	w.i64("line.polylineLeg", int64(lr.polylineLeg))
-	w.i64("line.legAx", int64(lr.legAx))
-	w.i64("line.legAy", int64(lr.legAy))
-	w.i64("line.legBx", int64(lr.legBx))
-	w.i64("line.legBy", int64(lr.legBy))
-	w.i64("line.legCx", int64(lr.legCx))
-	w.i64("line.legCy", int64(lr.legCy))
-	w.i64("line.legDx", int64(lr.legDx))
-	w.i64("line.legDy", int64(lr.legDy))
-	w.u16s("line.polylineGt", lr.polylineGt[:])
+	d := &v.cmd
+	w.drawOp("draw.op", &d.op)
+	w.u16("draw.cc", d.cc)
+	// The draw state's cycles and budget are per call, and its pixel
+	// cycles derive from cc.
+	w.i32("draw.line", d.st.Line)
+	w.flag("draw.begun", d.st.Begun)
+	w.flag("draw.done", d.st.Done)
+	w.spriteRow("draw.sprite", &d.st.Sprite)
+	w.quadLine("draw.quad", &d.st.Quad)
+	w.segment("draw.seg", &d.st.Seg)
 }
 
 func buildVDP2State(w *fieldWriter, v *VDP2) {
@@ -874,7 +773,20 @@ func buildCDState(w *fieldWriter, cb *CDBlock) {
 	w.i64("scdqCounter", int64(cb.scdqCounter))
 	w.i64("periCounter", int64(cb.periCounter))
 	w.flag("bufferStall", cb.bufferStall)
+	w.flag("fsInitialized", cb.fsInitialized)
+	w.u32("fsRootLBA", cb.fsRootLBA)
+	w.u32("fsRootSize", cb.fsRootSize)
+	fb := binary.BigEndian.AppendUint32(nil, uint32(len(cb.fsFiles)))
+	for i := range cb.fsFiles {
+		f := &cb.fsFiles[i]
+		fb = binary.BigEndian.AppendUint32(fb, f.fad)
+		fb = binary.BigEndian.AppendUint32(fb, f.size)
+		fb = append(fb, f.gapSize, f.unitSize, f.fileNum, f.attr)
+	}
+	w.raw("fsFiles", fb)
 }
+
+const cdFSMaxFiles = 254
 
 func buildCDBuffers(w *fieldWriter, cb *CDBlock) {
 	var (
@@ -1123,21 +1035,35 @@ func buildCDMpeg(w *fieldWriter, cb *CDBlock) {
 	w.flag("latch.dispOn", l.dispOn.Load())
 }
 
+// buildBusMisc serializes the bus flags and the bus timing state that
+// outlives a frame: the per-area contention windows and each SH-2's
+// draining write-buffer transaction, both absolute system cycles that
+// a frame's last accesses leave in the next frame.
 func buildBusMisc(w *fieldWriter, b *Bus) {
 	w.flag("minitWritten", b.minitWritten)
 	w.flag("sinitWritten", b.sinitWritten)
 	w.u16("cdDataTRNSCache", b.cdDataTRNSCache)
+	w.i64s("busyUntil", b.busyUntil[:])
+	w.i64("masterPendingWrite.until", b.masterPendingWrite.until)
+	w.u32("masterPendingWrite.cost", b.masterPendingWrite.cost)
+	w.i64("slavePendingWrite.until", b.slavePendingWrite.until)
+	w.u32("slavePendingWrite.cost", b.slavePendingWrite.cost)
 }
 
 // buildEmu serializes the emulator-level state that persists across
 // frame boundaries: the deferred system-reset and CKCHG master-NMI
 // latches (consumed at the TOP of the next RunFrame, so a state saved
-// after the requesting frame carries them set), and the per-line
-// cycle-width convergence carry with its mode-change detection pair
-// (persists across same-mode frames; reset only by systemReset).
+// after the requesting frame carries them set), the cross-CPU FRT
+// input-capture flags (a MINIT/SINIT written in a frame's last sync
+// chunk is consumed at the peer's first barrier of the next frame),
+// and the per-line cycle-width convergence carry with its mode-change
+// detection pair (persists across same-mode frames; reset only by
+// systemReset).
 func buildEmu(w *fieldWriter, e *Emulator) {
 	w.flag("pendingSystemReset", e.pendingSystemReset.Load())
 	w.flag("pendingMasterNMI", e.pendingMasterNMI.Load())
+	w.flag("minitPending", e.minitPending.Load())
+	w.flag("sinitPending", e.sinitPending.Load())
 	w.u64("lineWidthAccum", e.lineWidthAccum)
 	w.u32("lastTrueClock", e.lastTrueClock)
 	w.u32("lastD", e.lastD)
@@ -1352,6 +1278,11 @@ func decompressStateBody(payload []byte) ([]byte, error) {
 // ends call Serialize at rewind-capture rates (up to every other
 // frame), so the capture must fit inside a frame window.
 func (e *Emulator) Serialize() ([]byte, error) {
+	if !e.vdp1.pairKept.Load() {
+		// The device drew the pair: bring the CPU pair up to date
+		// through the frame's last line before it is captured.
+		e.renderer.syncPair(int(e.frameScanlines) - 1)
+	}
 	body := e.buildStateBody()
 	payload := e.compressStateBody(body)
 
@@ -1586,23 +1517,130 @@ func (r *fieldReader) flags(name string, n int) []bool {
 	return out
 }
 
-func (r *fieldReader) ddaEdge(prefix string) ddaEdge {
-	return ddaEdge{
-		x:  r.i64(prefix + ".x"),
-		y:  r.i64(prefix + ".y"),
-		dx: r.i64(prefix + ".dx"),
-		dy: r.i64(prefix + ".dy"),
+// drawOp reads a draw op written by fieldWriter.drawOp.
+func (r *fieldReader) drawOp(prefix string) draw.DrawOp {
+	var op draw.DrawOp
+	op.Kind = r.u32(prefix + ".kind")
+	// lineBase, seq, line, and buffer were written through version
+	// 7 and the op no longer carries them; a leftover unread field is
+	// an error, so they are read and discarded.
+	r.u32(prefix + ".lineBase")
+	r.u32(prefix + ".seq")
+	r.u32(prefix + ".line")
+	r.u32(prefix + ".buffer")
+	op.Addr = r.u32(prefix + ".addr")
+	p := &op.Pixel
+	p.CC = r.u32(prefix + ".pixel.cc")
+	p.MSBOn = r.u32(prefix + ".pixel.msbOn")
+	p.Mesh = r.u32(prefix + ".pixel.mesh")
+	p.UserClip = r.u32(prefix + ".pixel.userClip")
+	p.UCX1 = r.i32(prefix + ".pixel.ucx1")
+	p.UCY1 = r.i32(prefix + ".pixel.ucy1")
+	p.UCX2 = r.i32(prefix + ".pixel.ucx2")
+	p.UCY2 = r.i32(prefix + ".pixel.ucy2")
+	p.ClipX = r.i32(prefix + ".pixel.clipX")
+	p.ClipY = r.i32(prefix + ".pixel.clipY")
+	p.DIE = r.u32(prefix + ".pixel.die")
+	p.DILOdd = r.u32(prefix + ".pixel.dilOdd")
+	p.Is8bpp = r.u32(prefix+".pixel.is8bpp") != 0
+	p.FBWidth = r.i32(prefix + ".pixel.fbWidth")
+	if _, ok := r.fields[prefix+".pixel.fbHeight"]; ok {
+		p.FBHeight = r.i32(prefix + ".pixel.fbHeight")
+	} else if p.FBWidth > 0 {
+		// Through version 7 the op carried no height: its buffer's
+		// rows are the buffer's bytes over a row's bytes.
+		rowBytes := p.FBWidth * 2
+		if p.Is8bpp {
+			rowBytes = p.FBWidth
+		}
+		p.FBHeight = int32(vdp1FBSize) / rowBytes
+	}
+	p.ScaleShift = r.u32(prefix + ".pixel.scaleShift")
+	op.CharAddr = r.u32(prefix + ".charAddr")
+	op.CharW = r.i32(prefix + ".charW")
+	op.CharH = r.i32(prefix + ".charH")
+	op.ColorMode = r.u32(prefix + ".colorMode")
+	op.Color = r.u32(prefix + ".color")
+	op.Flags = r.u32(prefix + ".flags")
+	copy(op.X[:], r.i32s(prefix+".x", 4))
+	copy(op.Y[:], r.i32s(prefix+".y", 4))
+	copy(op.Gouraud[:], r.u32s(prefix+".gouraud", 4))
+	return op
+}
+
+func (r *fieldReader) spriteRow(prefix string) draw.SpriteRow {
+	st := draw.SpriteRow{
+		X:        r.i32(prefix + ".x"),
+		End:      r.i32(prefix + ".end"),
+		SrcReadX: r.i32(prefix + ".srcReadX"),
+	}
+	st.EC.Count = r.i32(prefix + ".endCodes")
+	if _, ok := r.fields[prefix+".prevSrcX"]; ok {
+		// Through version 7: the source column of the last end code
+		// counted, -1 before the first; the counter keeps it plus one.
+		st.EC.Last = r.i32(prefix+".prevSrcX") + 1
+	} else {
+		st.EC.Last = r.i32(prefix + ".lastEndColumn")
+	}
+	return st
+}
+
+func (r *fieldReader) quadLine(prefix string) draw.QuadLine {
+	return draw.QuadLine{
+		LX:        r.i32(prefix + ".lx"),
+		LY:        r.i32(prefix + ".ly"),
+		RX:        r.i32(prefix + ".rx"),
+		RY:        r.i32(prefix + ".ry"),
+		Len:       r.i32(prefix + ".len"),
+		J:         r.i32(prefix + ".j"),
+		JEnd:      r.i32(prefix + ".jEnd"),
+		DPX:       r.i64(prefix + ".dpx"),
+		DPY:       r.i64(prefix + ".dpy"),
+		UStart:    r.i32(prefix + ".uStart"),
+		DU:        r.i32(prefix + ".du"),
+		RowBase:   r.u32(prefix + ".rowBase"),
+		EC:        draw.EndCodeCounter{Count: r.i32(prefix + ".endCodes"), Last: r.i32(prefix + ".lastEndColumn")},
+		SrcReadU:  r.i32(prefix + ".srcReadU"),
+		HSSShrink: r.flag(prefix + ".hssShrink"),
+		CheckECD:  r.flag(prefix + ".checkEcd"),
+		Simple:    r.flag(prefix + ".simple"),
+		Gouraud:   r.gouraud(prefix + ".gouraud"),
 	}
 }
 
-func (r *fieldReader) gouraud(prefix string) gouraudStepper {
-	return gouraudStepper{
-		r:  int(r.i64(prefix + ".r")),
-		g:  int(r.i64(prefix + ".g")),
-		b:  int(r.i64(prefix + ".b")),
-		dr: int(r.i64(prefix + ".dr")),
-		dg: int(r.i64(prefix + ".dg")),
-		db: int(r.i64(prefix + ".db")),
+func (r *fieldReader) segment(prefix string) draw.Segment {
+	return draw.Segment{
+		X1:     r.i32(prefix + ".x1"),
+		Y1:     r.i32(prefix + ".y1"),
+		DX:     r.i32(prefix + ".dx"),
+		DY:     r.i32(prefix + ".dy"),
+		SX:     r.i32(prefix + ".sx"),
+		SY:     r.i32(prefix + ".sy"),
+		I:      r.i32(prefix + ".i"),
+		IMax:   r.i32(prefix + ".iMax"),
+		XMajor: r.flag(prefix + ".xMajor"),
+		GStart: r.u32(prefix + ".gStart"),
+		GEnd:   r.u32(prefix + ".gEnd"),
+	}
+}
+
+func (r *fieldReader) ddaEdge(prefix string) draw.DDAEdge {
+	return draw.DDAEdge{
+		X:  r.i64(prefix + ".x"),
+		Y:  r.i64(prefix + ".y"),
+		DX: r.i64(prefix + ".dx"),
+		DY: r.i64(prefix + ".dy"),
+	}
+}
+
+func (r *fieldReader) gouraud(prefix string) draw.GouraudStepper {
+	return draw.GouraudStepper{
+		R:  int32(r.i64(prefix + ".r")),
+		G:  int32(r.i64(prefix + ".g")),
+		B:  int32(r.i64(prefix + ".b")),
+		DR: int32(r.i64(prefix + ".dr")),
+		DG: int32(r.i64(prefix + ".dg")),
+		DB: int32(r.i64(prefix + ".db")),
 	}
 }
 
@@ -2139,193 +2177,28 @@ func decodeVDP1Resume(e *Emulator, r *fieldReader) func() {
 	cmdPhase := int(r.i64("cmdPhase"))
 	cmdSnapshot := r.vdp1Cmd("snap")
 
-	var sr spriteResumeState
-	sr.charAddr = r.u32("sprite.charAddr")
-	sr.charW = int(r.i64("sprite.charW"))
-	sr.charH = int(r.i64("sprite.charH"))
-	sr.colorMode = r.u16("sprite.colorMode")
-	sr.cc = r.u16("sprite.cc")
-	// pixCycles is derived from cc, not stored; recompute on load.
-	sr.pixCycles = vdp1PixelCycles(sr.cc)
-	sr.ecdOff = r.flag("sprite.ecdOff")
-	sr.spdOn = r.flag("sprite.spdOn")
-	sr.msbOn = r.flag("sprite.msbOn")
-	sr.mesh = r.flag("sprite.mesh")
-	sr.userClip = r.u16("sprite.userClip")
-	sr.flipH = r.flag("sprite.flipH")
-	sr.flipV = r.flag("sprite.flipV")
-	sr.drawX = int(r.i64("sprite.drawX"))
-	sr.drawY = int(r.i64("sprite.drawY"))
-	sr.clipX = int(r.i64("sprite.clipX"))
-	sr.clipY = int(r.i64("sprite.clipY"))
-	copy(sr.gt[:], r.u16s("sprite.gt", 4))
-	sr.isScaled = r.flag("sprite.isScaled")
-	sr.destW = int(r.i64("sprite.destW"))
-	sr.destH = int(r.i64("sprite.destH"))
-	sr.dstX1 = int(r.i64("sprite.dstX1"))
-	sr.dstY1 = int(r.i64("sprite.dstY1"))
-	sr.effFlipH = r.flag("sprite.effFlipH")
-	sr.effFlipV = r.flag("sprite.effFlipV")
-	sr.hssShrinkX = r.flag("sprite.hssShrinkX")
-	sr.hssOddParity = r.flag("sprite.hssOddParity")
-	sr.hssEcdOff = r.flag("sprite.hssEcdOff")
-	sr.outerIdx = int(r.i64("sprite.outerIdx"))
-	sr.innerIdx = int(r.i64("sprite.innerIdx"))
-	sr.endCodeCount = int(r.i64("sprite.endCodeCount"))
-	sr.prevSrcX = int(r.i64("sprite.prevSrcX"))
-	sr.srcReadX = int(r.i64("sprite.srcReadX"))
-
-	var dr distortedResumeState
-	dr.charAddr = r.u32("dist.charAddr")
-	dr.charW = int(r.i64("dist.charW"))
-	dr.charH = int(r.i64("dist.charH"))
-	dr.colorMode = r.u16("dist.colorMode")
-	dr.cc = r.u16("dist.cc")
-	dr.pixCycles = vdp1PixelCycles(dr.cc)
-	dr.ecdOff = r.flag("dist.ecdOff")
-	dr.spdOn = r.flag("dist.spdOn")
-	dr.msbOn = r.flag("dist.msbOn")
-	dr.mesh = r.flag("dist.mesh")
-	dr.userClip = r.u16("dist.userClip")
-	dr.hss = r.flag("dist.hss")
-	dr.hssOdd = r.flag("dist.hssOdd")
-	dr.hssShrinkU = r.flag("dist.hssShrinkU")
-	dr.flipH = r.flag("dist.flipH")
-	dr.flipV = r.flag("dist.flipV")
-	dr.bboxMinX = int(r.i64("dist.bboxMinX"))
-	dr.bboxMinY = int(r.i64("dist.bboxMinY"))
-	dr.bboxMaxX = int(r.i64("dist.bboxMaxX"))
-	dr.bboxMaxY = int(r.i64("dist.bboxMaxY"))
-	dr.clipX = int(r.i64("dist.clipX"))
-	dr.clipY = int(r.i64("dist.clipY"))
-	dr.ax = int(r.i64("dist.ax"))
-	dr.ay = int(r.i64("dist.ay"))
-	dr.bx = int(r.i64("dist.bx"))
-	dr.by = int(r.i64("dist.by"))
-	dr.cx = int(r.i64("dist.cx"))
-	dr.cy = int(r.i64("dist.cy"))
-	dr.dx = int(r.i64("dist.dx"))
-	dr.dy = int(r.i64("dist.dy"))
-	dr.dmax = int(r.i64("dist.dmax"))
-	dr.rowStride = int(r.i64("dist.rowStride"))
-	dr.bpp8 = r.flag("dist.bpp8")
-	dr.simpleMode = r.flag("dist.simpleMode")
-	copy(dr.gt[:], r.u16s("dist.gt", 4))
-	dr.checkEcd = r.flag("dist.checkEcd")
-	dr.colr = r.u16("dist.colr")
-	dr.uStart = int(r.i64("dist.uStart"))
-	dr.uEnd = int(r.i64("dist.uEnd"))
-	dr.dvFP = int(r.i64("dist.dvFP"))
-	dr.leftEdge = r.ddaEdge("dist.leftEdge")
-	dr.rightEdge = r.ddaEdge("dist.rightEdge")
-	dr.gsOuterLeft = r.gouraud("dist.gsOuterLeft")
-	dr.gsOuterRight = r.gouraud("dist.gsOuterRight")
-	dr.vFP = int(r.i64("dist.vFP"))
-	dr.outerI = int(r.i64("dist.outerI"))
-	dr.innerJ = int(r.i64("dist.innerJ"))
-	dr.curLx = int(r.i64("dist.curLx"))
-	dr.curLy = int(r.i64("dist.curLy"))
-	dr.curRx = int(r.i64("dist.curRx"))
-	dr.curRy = int(r.i64("dist.curRy"))
-	dr.rowBase = r.u32("dist.rowBase")
-	dr.lineDx = int(r.i64("dist.lineDx"))
-	dr.lineDy = int(r.i64("dist.lineDy"))
-	dr.lineLen = int(r.i64("dist.lineLen"))
-	dr.jEnd = int(r.i64("dist.jEnd"))
-	dr.pxFP = r.i64("dist.pxFP")
-	dr.pyFP = r.i64("dist.pyFP")
-	dr.dpxFP = r.i64("dist.dpxFP")
-	dr.dpyFP = r.i64("dist.dpyFP")
-	dr.uFP = int(r.i64("dist.uFP"))
-	dr.duFP = int(r.i64("dist.duFP"))
-	dr.prevPx = int(r.i64("dist.prevPx"))
-	dr.prevPy = int(r.i64("dist.prevPy"))
-	dr.endCodeCount = int(r.i64("dist.endCodeCount"))
-	dr.srcReadU = int(r.i64("dist.srcReadU"))
-	dr.gsLine = r.gouraud("dist.gsLine")
-
-	var pr polygonResumeState
-	pr.color = r.u16("poly.color")
-	pr.cc = r.u16("poly.cc")
-	pr.pixCycles = vdp1PixelCycles(pr.cc)
-	pr.msbOn = r.flag("poly.msbOn")
-	pr.mesh = r.flag("poly.mesh")
-	pr.userClip = r.u16("poly.userClip")
-	pr.clipX = int(r.i64("poly.clipX"))
-	pr.clipY = int(r.i64("poly.clipY"))
-	pr.simpleMode = r.flag("poly.simpleMode")
-	copy(pr.gt[:], r.u16s("poly.gt", 4))
-	pr.ax = int(r.i64("poly.ax"))
-	pr.ay = int(r.i64("poly.ay"))
-	pr.bx = int(r.i64("poly.bx"))
-	pr.by = int(r.i64("poly.by"))
-	pr.cx = int(r.i64("poly.cx"))
-	pr.cy = int(r.i64("poly.cy"))
-	pr.dx = int(r.i64("poly.dx"))
-	pr.dy = int(r.i64("poly.dy"))
-	pr.dmax = int(r.i64("poly.dmax"))
-	pr.leftEdge = r.ddaEdge("poly.leftEdge")
-	pr.rightEdge = r.ddaEdge("poly.rightEdge")
-	pr.gsOuterLeft = r.gouraud("poly.gsOuterLeft")
-	pr.gsOuterRight = r.gouraud("poly.gsOuterRight")
-	pr.gsLine = r.gouraud("poly.gsLine")
-	pr.outerI = int(r.i64("poly.outerI"))
-	pr.innerJ = int(r.i64("poly.innerJ"))
-	pr.curLx = int(r.i64("poly.curLx"))
-	pr.curLy = int(r.i64("poly.curLy"))
-	pr.curRx = int(r.i64("poly.curRx"))
-	pr.curRy = int(r.i64("poly.curRy"))
-	pr.lineDx = int(r.i64("poly.lineDx"))
-	pr.lineDy = int(r.i64("poly.lineDy"))
-	pr.lineLen = int(r.i64("poly.lineLen"))
-	pr.jEnd = int(r.i64("poly.jEnd"))
-	pr.pxFP = r.i64("poly.pxFP")
-	pr.pyFP = r.i64("poly.pyFP")
-	pr.dpxFP = r.i64("poly.dpxFP")
-	pr.dpyFP = r.i64("poly.dpyFP")
-	pr.prevPx = int(r.i64("poly.prevPx"))
-	pr.prevPy = int(r.i64("poly.prevPy"))
-
-	var lr lineResumeState
-	lr.color = r.u16("line.color")
-	lr.cc = r.u16("line.cc")
-	lr.pixCycles = vdp1PixelCycles(lr.cc)
-	lr.msbOn = r.flag("line.msbOn")
-	lr.mesh = r.flag("line.mesh")
-	lr.userClip = r.u16("line.userClip")
-	lr.clipX = int(r.i64("line.clipX"))
-	lr.clipY = int(r.i64("line.clipY"))
-	lr.gStart = r.u16("line.gStart")
-	lr.gEnd = r.u16("line.gEnd")
-	lr.x = int(r.i64("line.x"))
-	lr.y = int(r.i64("line.y"))
-	lr.dx = int(r.i64("line.dx"))
-	lr.dy = int(r.i64("line.dy"))
-	lr.sx = int(r.i64("line.sx"))
-	lr.sy = int(r.i64("line.sy"))
-	lr.err = int(r.i64("line.err"))
-	lr.iter = int(r.i64("line.iter"))
-	lr.iterMax = int(r.i64("line.iterMax"))
-	lr.xMajor = r.flag("line.xMajor")
-	lr.polylineLeg = int(r.i64("line.polylineLeg"))
-	lr.legAx = int(r.i64("line.legAx"))
-	lr.legAy = int(r.i64("line.legAy"))
-	lr.legBx = int(r.i64("line.legBx"))
-	lr.legBy = int(r.i64("line.legBy"))
-	lr.legCx = int(r.i64("line.legCx"))
-	lr.legCy = int(r.i64("line.legCy"))
-	lr.legDx = int(r.i64("line.legDx"))
-	lr.legDy = int(r.i64("line.legDy"))
-	copy(lr.polylineGt[:], r.u16s("line.polylineGt", 4))
+	var d drawResume
+	d.op = r.drawOp("draw.op")
+	d.cc = r.u16("draw.cc")
+	// The pixel cycles derive from cc, not stored; recomputed on load.
+	d.st.PixCycles = vdp1PixelCycles(d.cc)
+	d.st.Line = r.i32("draw.line")
+	d.st.Begun = r.flag("draw.begun")
+	d.st.Done = r.flag("draw.done")
+	d.st.Sprite = r.spriteRow("draw.sprite")
+	d.st.Quad = r.quadLine("draw.quad")
+	d.st.Lines = draw.OpLines(&d.op)
+	d.st.Form = draw.OpForm(&d.op)
+	d.st.Seg = r.segment("draw.seg")
 
 	return func() {
 		v := e.vdp1
 		v.cmdPhase = cmdPhase
 		v.cmdSnapshot = cmdSnapshot
-		v.spriteResume = sr
-		v.distortedResume = dr
-		v.polygonResume = pr
-		v.lineResume = lr
+		// Whether the walk draws is the session's, not the state's.
+		d.st.Timing = !v.pairKept.Load()
+		v.cmd = d
+		v.restartRestoredList()
 	}
 }
 
@@ -2464,8 +2337,8 @@ func decodeCDState(e *Emulator, r *fieldReader) func() {
 	dataPos := r.iRange("dataPos", 0, int64(len(dataBuf)))
 	dataTransferType := r.u8("dataTransferType")
 	delPart := r.iRange("delPart", -1, 23)
-	delStart := r.i64("delStart")
-	delCount := r.i64("delCount")
+	delStart := r.iRange("delStart", 0, cdMaxSectors)
+	delCount := r.iRange("delCount", 0, cdMaxSectors)
 	status := r.u8("status")
 	cdDeviceFilter := r.u8("cdDeviceFilter")
 	lastBufferDest := r.u8("lastBufferDest")
@@ -2502,6 +2375,35 @@ func decodeCDState(e *Emulator, r *fieldReader) func() {
 	scdqCounter := r.i64("scdqCounter")
 	periCounter := r.i64("periCounter")
 	bufferStall := r.flag("bufferStall")
+	fsInitialized := r.flag("fsInitialized")
+	fsRootLBA := r.u32("fsRootLBA")
+	fsRootSize := r.u32("fsRootSize")
+	var fsFiles []cdcFile
+	if fb := r.take("fsFiles", -1); r.err == nil && len(fb) > 0 {
+		if len(fb) < 4 {
+			r.fail("field fsFiles truncated")
+		} else {
+			count := int(binary.BigEndian.Uint32(fb))
+			if count > cdFSMaxFiles {
+				r.fail("field fsFiles count %d exceeds %d", count, cdFSMaxFiles)
+			} else if len(fb) != 4+count*12 {
+				r.fail("field fsFiles size %d for count %d", len(fb), count)
+			} else if count > 0 {
+				fsFiles = make([]cdcFile, count)
+				for i := range fsFiles {
+					rec := fb[4+i*12:]
+					fsFiles[i] = cdcFile{
+						fad:      binary.BigEndian.Uint32(rec),
+						size:     binary.BigEndian.Uint32(rec[4:]),
+						gapSize:  rec[8],
+						unitSize: rec[9],
+						fileNum:  rec[10],
+						attr:     rec[11],
+					}
+				}
+			}
+		}
+	}
 	return func() {
 		cb := e.cdblock
 		cb.hirqReq = hirqReq
@@ -2554,6 +2456,10 @@ func decodeCDState(e *Emulator, r *fieldReader) func() {
 		cb.scdqCounter = int(scdqCounter)
 		cb.periCounter = int(periCounter)
 		cb.bufferStall = bufferStall
+		cb.fsInitialized = fsInitialized
+		cb.fsRootLBA = fsRootLBA
+		cb.fsRootSize = fsRootSize
+		cb.fsFiles = fsFiles
 	}
 }
 
@@ -2707,7 +2613,7 @@ func decodeCDMpeg(e *Emulator, r *fieldReader) func() {
 	vidStatus := r.u16("vidStatus")
 	audStatus := r.u8("audStatus")
 	vsyncCounter := r.u16("vsyncCounter")
-	vsyncAccum := r.i64("vsyncAccum")
+	vsyncAccum := r.iRange("vsyncAccum", 0, math.MaxInt32)
 
 	playActive := r.flag("playActive")
 	fed := r.i64s("layer.fed", 2)
@@ -2739,9 +2645,12 @@ func decodeCDMpeg(e *Emulator, r *fieldReader) func() {
 	esEnded := r.flags("layer.esEnded", 2)
 	esProbed := r.flags("layer.esProbed", 2)
 	esDirect := r.flags("layer.esDirect", 2)
-	pictAccum := r.i64("pictAccum")
-	pictCycles := r.i64("pictCycles")
-	hostSteps := r.i64("hostSteps")
+	pictAccum := r.iRange("pictAccum", 0, math.MaxInt32)
+	pictCycles := r.iRange("pictCycles", 0, math.MaxInt32)
+	if r.err == nil && pictAccum > 4*pictCycles {
+		r.fail("field pictAccum %d exceeds four pictures of %d cycles", pictAccum, pictCycles)
+	}
+	hostSteps := r.iRange("hostSteps", 0, math.MaxInt32)
 	firstVidPTS := r.u64("firstVidPTS")
 	firstAudPTS := r.u64("firstAudPTS")
 	audStarted := r.flag("audStarted")
@@ -2887,7 +2796,7 @@ func decodeCDMpeg(e *Emulator, r *fieldReader) func() {
 		m.vidStatus = vidStatus
 		m.audStatus = audStatus
 		m.vsyncCounter = vsyncCounter
-		m.vsyncAccum = int(vsyncAccum)
+		m.vsyncAccum = vsyncAccum
 
 		// Resync restore: the decoder pipeline is not serialized, so an
 		// in-flight playback gets a fresh pipeline that re-feeds from
@@ -2950,9 +2859,9 @@ func decodeCDMpeg(e *Emulator, r *fieldReader) func() {
 					l.es.SignalEnd()
 				}
 			}
-			p.pictAccum = int(pictAccum)
-			p.pictCycles = int(pictCycles)
-			p.hostSteps = int(hostSteps)
+			p.pictAccum = pictAccum
+			p.pictCycles = pictCycles
+			p.hostSteps = hostSteps
 			p.firstVidPTS = math.Float64frombits(firstVidPTS)
 			p.firstAudPTS = math.Float64frombits(firstAudPTS)
 			p.audStarted = audStarted
@@ -3000,16 +2909,40 @@ func decodeBusMisc(e *Emulator, r *fieldReader) func() {
 	minitWritten := r.flag("minitWritten")
 	sinitWritten := r.flag("sinitWritten")
 	cdDataTRNSCache := r.u16("cdDataTRNSCache")
-	return func() {
-		e.bus.minitWritten = minitWritten
-		e.bus.sinitWritten = sinitWritten
-		e.bus.cdDataTRNSCache = cdDataTRNSCache
+	busyUntil := r.i64s("busyUntil", int(areaCount))
+	masterUntil := r.i64("masterPendingWrite.until")
+	masterCost := r.u32("masterPendingWrite.cost")
+	slaveUntil := r.i64("slavePendingWrite.until")
+	slaveCost := r.u32("slavePendingWrite.cost")
+	if limit := busWriteCostMax(); r.err == nil && (masterCost > limit || slaveCost > limit) {
+		r.fail("field pendingWrite.cost %d/%d exceeds the largest write transaction %d", masterCost, slaveCost, limit)
 	}
+	return func() {
+		b := e.bus
+		b.minitWritten = minitWritten
+		b.sinitWritten = sinitWritten
+		b.cdDataTRNSCache = cdDataTRNSCache
+		copy(b.busyUntil[:], busyUntil)
+		b.masterPendingWrite = pendingWrite{until: masterUntil, cost: masterCost}
+		b.slavePendingWrite = pendingWrite{until: slaveUntil, cost: slaveCost}
+	}
+}
+
+// busWriteCostMax is the largest write transaction cost in the access
+// tables, single or burst.
+func busWriteCostMax() uint32 {
+	var m uint32
+	for i := range accessWriteSingle {
+		m = max(m, accessWriteSingle[i], accessWriteBurst[i])
+	}
+	return m
 }
 
 func decodeEmu(e *Emulator, r *fieldReader) func() {
 	pendingSystemReset := r.flag("pendingSystemReset")
 	pendingMasterNMI := r.flag("pendingMasterNMI")
+	minitPending := r.flag("minitPending")
+	sinitPending := r.flag("sinitPending")
 	lineWidthAccum := r.u64("lineWidthAccum")
 	lastTrueClock := r.u32("lastTrueClock")
 	lastD := r.u32("lastD")
@@ -3017,6 +2950,8 @@ func decodeEmu(e *Emulator, r *fieldReader) func() {
 	return func() {
 		e.pendingSystemReset.Store(pendingSystemReset)
 		e.pendingMasterNMI.Store(pendingMasterNMI)
+		e.minitPending.Store(minitPending)
+		e.sinitPending.Store(sinitPending)
 		e.lineWidthAccum = lineWidthAccum
 		e.lastTrueClock = lastTrueClock
 		e.lastD = lastD
@@ -3176,6 +3111,10 @@ func (e *Emulator) Deserialize(data []byte) error {
 	e.vdp2.recalcTiming()
 	e.vdp2.regsDirty = true
 	e.vdp2.cramCacheValid = false
+	e.vdp2.markAllPages()
+	e.vdp1.vramDirty.markAll(vdp1VRAMPages)
+	e.vdp1.resyncFB()
+	e.vdp2.SetRegCapture(e.vdp2.regCapture)
 	e.cdblock.playTypeFADLow = 0
 	e.cdblock.playTypeFADHigh = 0
 	return nil

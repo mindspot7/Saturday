@@ -149,8 +149,11 @@ func TestDistortedSpriteGouraud(t *testing.T) {
 	v.VBlankIn()
 	drainDrawing(v)
 	expectRed(t, v, 0, 0, 0, "distorted A")
-	if got := readFBPixel(v, 3, 9); got&0x8000 == 0 || got&0x1F < 14 {
-		t.Errorf("distorted B (3,9) = 0x%04X, want R 14..15", got)
+	// B's dot is drawn again by the next connecting line, from (0,1)
+	// to (3,10), at step 8 of its 9, where the correction is eight
+	// ninths of the way from the left value (0) to the right (15).
+	if got := readFBPixel(v, 3, 9); got&0x8000 == 0 || got&0x1F < 13 || got&0x1F > 14 {
+		t.Errorf("distorted B (3,9) = 0x%04X, want R 13..14", got)
 	}
 }
 

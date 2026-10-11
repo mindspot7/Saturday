@@ -3,6 +3,8 @@
 
 package core
 
+import "github.com/user-none/erings/core/compute"
+
 const (
 	vdp2RegCount = 144        // 288 bytes / 2
 	vdp2VRAMSize = 512 * 1024 // 512 KB
@@ -163,14 +165,16 @@ const (
 	linesPAL  = 313
 
 	// Maximum framebuffer dimensions (Hi-Res B + double-density interlace + PAL 256)
-	maxWidth  = 704
 	maxHeight = 512
+
+	// frameBlack is an opaque black output frame pixel.
+	frameBlack = 0xFF000000
 )
 
 // exbgSource provides decoded external-image frames for EXBG (the
 // MPEG card's video output). Implemented by CDBlock.
 type exbgSource interface {
-	// MpegFrameRGB returns the newest frame as packed 0x00RRGGBB, read
+	// MpegFrameRGB returns the newest frame as decoded colors, read
 	// in place: the slice is owned by the caller until the next call.
 	// ok is false when no displayable frame exists.
 	MpegFrameRGB() (rgb []uint32, w, h int, ok bool)
@@ -182,10 +186,7 @@ type VDP2 struct {
 	vram []byte
 	cram []byte
 
-	// Rendering output
-	framebuffer []byte      // RGBA8888 output, max maxWidth*maxHeight*4
-	layerBufs   [4][]uint32 // per-NBG layer, packed priority<<24|R<<16|G<<8|B
-	activeWidth uint16      // 320, 352, 640, or 704
+	activeWidth uint16 // 320, 352, 640, or 704
 
 	// EXBG external image input (MPEG card decoded video). The source
 	// is polled once per frame; the pixels feed the NBG1 slot when
@@ -193,7 +194,7 @@ type VDP2 struct {
 	// consumer-owned triple-buffer slot: stable until the next poll,
 	// never copied.
 	exbgSrc exbgSource
-	exbgBuf []uint32 // packed 0x00RRGGBB, exbgW*exbgH
+	exbgBuf []uint32 // decoded colors, exbgW*exbgH
 	exbgW   int
 	exbgH   int
 	exbgOK  bool // frame latched this frame
@@ -233,12 +234,6 @@ type VDP2 struct {
 	activeLines        uint16
 	pal                bool
 
-	// RBG layer buffers
-	rbg0Buf   []uint32
-	rbg1Buf   []uint32
-	rbg0LCBuf []uint8 // per-pixel coefficient line color (bit7=valid, bits6:0=data)
-	rbg1LCBuf []uint8
-
 	// Per-scanline RPRCTL re-read arm bits, indexed by raster line. An
 	// SH-2 write to RPRCTL records its bits at the line the write occurs
 	// on (v.vLine); the renderer consumes the entry for the line it is
@@ -265,9 +260,11 @@ type VDP2 struct {
 	// capture instead.
 	scynFrame [4]int32
 
-	// VDP1 display framebuffer for the line being rendered. Written
-	// only at BeginLine entry from its argument.
+	// VDP1 frame buffer the frame's sprite layer samples, and the row
+	// being rendered. Written only at BeginLine entry from its
+	// arguments.
 	lineFB vdp1FBView
+	lineY  int
 
 	// Rotated-read coordinates for the line's sprite framebuffer
 	// samples, prepared by BeginLine when lineFB is rotated: .10 FP
@@ -279,19 +276,10 @@ type VDP2 struct {
 		dx, dy       int64
 	}
 
-	// Line state prepared by BeginLine and consumed by RenderTo:
-	// whether the row renders at all, the span renderer chain (enabled
-	// layers, gradation, composite) holding each renderer's per-line
-	// setup in its closure, and the render cursor.
-	//
-	// lineSpans is sized to the maximum simultaneous span count: 4 NBG +
-	// RBG0 + gradation + composite = 7. RBG1 never adds an eighth slot
-	// because BGON bit 5 (RBG1 active) forces all NBG screens off in
-	// decodeLineState, so the NBG and RBG1 spans are mutually exclusive.
+	// Line state prepared by BeginLine and consumed at the row's render
+	// point: whether the row renders at all. The row's chain and params
+	// are its record (vdp2_rows.go).
 	lineActive bool
-	lineNSpans int
-	lineSpans  [7]func(x0, x1 int)
-	lineSpanX  int
 
 	// regsDirty is set by register writes; BeginLine re-decodes the
 	// register-derived line state only when set (or at a frame's first
@@ -302,20 +290,41 @@ type VDP2 struct {
 	// instead of a CRAM read plus RGB conversion. Invalidated by CRAM
 	// writes; rebuilt at the next BeginLine, so CRAM writes take
 	// effect on the following line.
-	cramCacheR     [2048]uint8
-	cramCacheG     [2048]uint8
-	cramCacheB     [2048]uint8
-	cramCacheCC    [2048]bool
+	// palette is CRAM decoded per entry for cramCacheMode (render
+	// vdp2.PaletteEntry). BeginLine rebuilds it when a RAMCTL write has
+	// cleared cramCacheValid; a CRAM write updates the entry it lands
+	// in, so the palette stays valid through the line.
+	palette        compute.Palette
+	cramCacheMode  uint32
 	cramCacheMask  uint32
 	cramCacheValid bool
 
-	// Window-mask fast path. The per-layer window control decode and
-	// the all-windows-disabled early-out depend only on registers, so
-	// the disabled-window result is precomputed by the line-state
-	// decode instead of per pixel.
-	winMaskSkip  [6]bool
-	winMaskVal   [6]bool
-	winMaskValid bool
+	// Row window state built by BeginLine (buildLineWindows) and
+	// consumed by the composite setup.
+	lineWin lineWindows
+
+	// rows holds the per-row render state BeginLine builds
+	// (vdp2_rows.go). Both renderers consume it.
+	rows frameRows
+
+	// Dirty page maps of VRAM and CRAM (vdp2_delta.go): every write
+	// marks its page, and the GPU renderer takes the marked pages at
+	// a row's first render point to deliver the memory the row reads.
+	vramDirty pageDirty
+	cramDirty pageDirty
+
+	// Per-line register capture: with regCapture set, the raster
+	// timebase records the register block as its line counter
+	// advances, on the CPU side, and BeginLine reads the record for
+	// its line instead of the live registers, so a row's registers
+	// are those in force when its line began regardless of how far
+	// the walker trails. regDirtyLine records whether any register
+	// was written during the line before; forceDecode makes the
+	// frame's first BeginLine decode the line state.
+	regCapture   bool
+	regLines     [][vdp2RegCount]uint16
+	regDirtyLine []bool
+	forceDecode  bool
 
 	// Render state. Frame-scoped fields (geometry, field parity,
 	// DISP, rotation parameters) are sampled by BeginFrame; the rest
@@ -330,19 +339,12 @@ type VDP2 struct {
 // NewVDP2 creates a new VDP2 instance with VRAM and CRAM allocated.
 func NewVDP2(scu *SCU) *VDP2 {
 	v := &VDP2{
-		vram:        make([]byte, vdp2VRAMSize),
-		cram:        make([]byte, vdp2CRAMSize),
-		framebuffer: make([]byte, maxWidth*maxHeight*4),
-		rbg0Buf:     make([]uint32, maxWidth*maxHeight),
-		rbg1Buf:     make([]uint32, maxWidth*maxHeight),
-		rbg0LCBuf:   make([]uint8, maxWidth*maxHeight),
-		rbg1LCBuf:   make([]uint8, maxWidth*maxHeight),
-		scu:         scu,
-		oddField:    true,
+		vram:     make([]byte, vdp2VRAMSize),
+		cram:     make([]byte, vdp2CRAMSize),
+		scu:      scu,
+		oddField: true,
 	}
-	for i := range v.layerBufs {
-		v.layerBufs[i] = make([]uint32, maxWidth*maxHeight)
-	}
+	v.rows.lines = make([]lineRecord, rowRecordMax)
 	v.recalcTiming()
 	// Prime the frame-scoped state so geometry accessors
 	// (FramebufferStride, DisplayHeight) report sane values before the
@@ -367,6 +369,11 @@ func (v *VDP2) Reset() {
 	clear(v.vram)
 	clear(v.cram)
 	v.recalcTiming()
+	// Every page changed, and the per-line register records follow
+	// the cleared registers. Runs between frames.
+	v.markAllPages()
+	v.cramCacheValid = false
+	v.SetRegCapture(v.regCapture)
 }
 
 // ResetRegisters zeros the register file to power-on values, leaving VRAM,
@@ -379,6 +386,7 @@ func (v *VDP2) ResetRegisters() {
 	}
 	v.cramCacheValid = false
 	v.recalcTiming()
+	v.SetRegCapture(v.regCapture)
 }
 
 // SetEXBGSource wires the external-image provider (the CD block's
@@ -505,7 +513,9 @@ func (v *VDP2) ReadVRAM(addr uint32) uint8 {
 
 // WriteVRAM writes a byte to VDP2 VRAM.
 func (v *VDP2) WriteVRAM(addr uint32, val uint8) {
-	v.vram[addr&(vdp2VRAMSize-1)] = val
+	addr &= vdp2VRAMSize - 1
+	v.vram[addr] = val
+	v.markVRAMPage(addr)
 }
 
 // ReadVRAM16 reads a big-endian 16-bit value from VDP2 VRAM.
@@ -519,6 +529,7 @@ func (v *VDP2) WriteVRAM16(addr uint32, val uint16) {
 	addr &= vdp2VRAMSize - 2
 	v.vram[addr] = uint8(val >> 8)
 	v.vram[addr+1] = uint8(val)
+	v.markVRAMPage(addr)
 }
 
 // ReadVRAM32 reads a big-endian 32-bit value from VDP2 VRAM.
@@ -535,6 +546,7 @@ func (v *VDP2) WriteVRAM32(addr uint32, val uint32) {
 	v.vram[addr+1] = uint8(val >> 16)
 	v.vram[addr+2] = uint8(val >> 8)
 	v.vram[addr+3] = uint8(val)
+	v.markVRAMPage(addr)
 }
 
 // ReadCRAM reads a byte from VDP2 Color RAM.
@@ -546,12 +558,16 @@ func (v *VDP2) ReadCRAM(addr uint32) uint8 {
 // In CRAM mode 0, writes are mirrored between lower and upper 2KB halves.
 func (v *VDP2) WriteCRAM(addr uint32, val uint8) {
 	addr &= vdp2CRAMSize - 1
+	mirrored := (v.regs[vdp2RAMCTL]>>12)&0x03 == 0
 	v.cram[addr] = val
-	cramMode := (v.regs[vdp2RAMCTL] >> 12) & 0x03
-	if cramMode == 0 {
+	v.markCRAMPage(addr)
+	if mirrored {
 		v.cram[addr^0x800] = val // mirror to other half
+		v.markCRAMPage(addr ^ 0x800)
 	}
-	v.cramCacheValid = false
+	if v.cramCacheValid {
+		v.updatePaletteEntry(addr)
+	}
 }
 
 // ReadCRAM16 reads a big-endian 16-bit value from VDP2 Color RAM.
@@ -645,15 +661,12 @@ func (v *VDP2) fieldBit() int {
 }
 
 // ActiveWidth returns the number of active pixels per line.
-func (v *VDP2) ActiveWidth() uint16               { return v.activeWidth }
-func (v *VDP2) ActiveSystemCyclesPerLine() uint32 { return v.activeSystemCycles }
+func (v *VDP2) ActiveWidth() uint16 { return v.activeWidth }
 
-// Framebuffer returns the RGBA8888 pixel output buffer.
-func (v *VDP2) Framebuffer() []byte { return v.framebuffer }
-
-// FramebufferStride returns the stride (bytes per row) of the
-// framebuffer. Reads the BeginFrame sample for the same reason as
-// DisplayHeight: it must match the geometry the frame was rendered at.
+// FramebufferStride returns the stride (bytes per row) of the frame
+// the renderers write. Reads the BeginFrame sample for the same
+// reason as DisplayHeight: it must match the geometry the frame was
+// rendered at.
 func (v *VDP2) FramebufferStride() int { return v.frame.width * 4 }
 
 // inHBlank reports whether the line has passed the end of its active
@@ -712,6 +725,7 @@ func (v *VDP2) EndLine() {
 	v.lineCycle = 0
 	v.hblankRaised = false
 	v.vLine++
+	v.lineBegan()
 
 	if v.vLine == v.activeLines {
 		v.scu.RaiseVBlankIN()
@@ -727,6 +741,7 @@ func (v *VDP2) EndFrame() {
 	v.lineCycle = 0
 	v.hblankRaised = false
 	v.vLine = 0
+	v.lineBegan()
 	v.oddField = !v.oddField
 
 	// Top-of-display capture for the NBG vertical counters
@@ -741,6 +756,41 @@ func (v *VDP2) EndFrame() {
 	if v.vblankOutLine() >= v.linesPerFrame {
 		v.scu.RaiseVBlankOUT()
 	}
+}
+
+// lineBegan runs as the line counter enters a new line, on the CPU
+// side: with regCapture set it records the register block as the
+// line's registers, so the walker's BeginLine for this line reads
+// the registers in force when the line began. The dirty flag the
+// register writes set is consumed into the line's record.
+func (v *VDP2) lineBegan() {
+	if !v.regCapture {
+		return
+	}
+	if int(v.vLine) >= len(v.regLines) {
+		return
+	}
+	v.regLines[v.vLine] = v.regs
+	v.regDirtyLine[v.vLine] = v.regsDirty
+	v.regsDirty = false
+}
+
+// SetRegCapture turns per-line register capture on or off. The
+// emulator enables it for both renderers; VDP2 instances driven
+// without the raster timebase read the live registers.
+func (v *VDP2) SetRegCapture(on bool) {
+	if on && v.regLines == nil {
+		v.regLines = make([][vdp2RegCount]uint16, rowRecordMax)
+		v.regDirtyLine = make([]bool, rowRecordMax)
+	}
+	v.regCapture = on
+	if on {
+		for i := range v.regLines {
+			v.regLines[i] = v.regs
+			v.regDirtyLine[i] = true
+		}
+	}
+	v.regsDirty = true
 }
 
 // buildTVSTAT computes the TVSTAT register from current timing state.

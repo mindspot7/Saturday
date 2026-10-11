@@ -39,24 +39,24 @@ import (
 //   each chunk. Bounded against the VDP walker transitively, through
 //   the master.
 //
-//   VDP worker: ticks VDP1 incremental command processing in tick
-//   chunks and streams the VDP2 row render along the dot clock - each
-//   chunk renders the pixels the beam covered, so the render cost
-//   spreads across the line instead of bursting at a boundary. It
-//   starts a line only when both CPUs have completed it, so VDP1
-//   never processes a cycle before the CPUs' writes for that line
-//   have landed. Frame events fire at their cycle positions: the VDP1
-//   frame-buffer change machinery, the VDP2 frame sample, and row 0
-//   at the end of line 0 (VDP1's FBCR latch point per manual
-//   Sec 4.2); VDP2 BeginLine at each later active line's cycle 0;
-//   late erase and VBlankIn at the start of the first vblank line.
+//   VDP worker: walks the frame a line at a time - it advances VDP1
+//   incremental command processing by the line's cycles and renders
+//   the VDP2 row at the line's end. It starts a line only when both
+//   CPUs have completed it, so VDP1 never processes a cycle before
+//   the CPUs' writes for that line have landed. Frame events fire at
+//   their line positions: the VDP1
+//   frame change (register take-in, swap or parity erase, EDSR), the
+//   VDP2 frame sample, and row 0 at the end of line 0 (VDP1's FBCR
+//   take-in point per manual Sec 4.2); VDP2 BeginLine at each later
+//   active line's cycle 0; the deferred manual-mode erase at the
+//   start of the first vblank line.
 //
 // VDP2 rendering reads live state: BeginFrame samples only the
 // frame-scoped values (geometry, field parity, DISP, rotation
 // parameter tables); BeginLine re-snapshots the registers and the
 // VDP1 display-FB view for every row, so register writes land on the
-// following row; VRAM and the VDP1 framebuffer are read as the spans
-// render, so mid-line writes are visible to the row's later pixels.
+// following row; VRAM and the VDP1 framebuffer are read as the row
+// renders at its line's end.
 //
 // recalcTiming refreshes per-scanline and per-frame counts whenever
 // VDP2 mode changes. fps is held to integer (60 NTSC / 50 PAL) so
@@ -64,15 +64,6 @@ import (
 // and m68k-cycles-per-frame. CDBlock.RecalcTiming is fed the actual
 // system clock rate so CD-DA and SCDQ pacing tracks the current mode
 // rather than a compile-time constant.
-
-// tickChunkCycles is the VDP walker's step cadence within a scanline: it
-// ticks VDP1 incremental command processing and advances the VDP2 row
-// render in chunks of this many system cycles. It is a render
-// granularity, not a synchronization window - the walker waits on the
-// CPUs only at scanline boundaries. The two CPUs sync to each other on
-// their own cadence (syncChunkCycles); data safety on every shared access
-// is the per-area bus locks regardless of chunk size.
-const tickChunkCycles = 10
 
 // syncChunkCycles bounds how far the master (main goroutine) and slave
 // (secondary worker) SH-2 clocks may drift apart. Each steps this many
@@ -135,6 +126,35 @@ func spinWait(ctr *atomic.Int64, target int64) {
 	}
 }
 
+// waitLineEnd waits for both CPUs to complete the line ending at
+// target, answering a CPU's request for the frame buffer pair while
+// it waits (servicePair): the requesting CPU is spinning inside its
+// read and cannot finish the line until the request is answered.
+func (e *Emulator) waitLineEnd(target int64, line int) {
+	spins := 0
+	for e.masterCycles.Load() < target || e.secondaryCycles.Load() < target {
+		if e.vdp1.pairRequest.Load() {
+			e.servicePair(line)
+		}
+		spins++
+		if spins >= barrierSpinLimit {
+			runtime.Gosched()
+			spins = 0
+		}
+	}
+}
+
+// servicePair answers a CPU read's request for the CPU pair
+// (VDP1.waitPair), on the walker between ticks: the renderer brings
+// the pair up to date from the device pair through line, and the
+// walk keeps the pair from here on, the command in progress
+// included, so the read and every later one are served from it.
+func (e *Emulator) servicePair(line int) {
+	e.renderer.syncPair(line)
+	e.vdp1.setPairKept(true)
+	e.vdp1.pairRequest.Store(false)
+}
+
 // RunFrame executes one complete frame of emulation.
 func (e *Emulator) RunFrame() {
 	smpc := e.smpc
@@ -175,12 +195,10 @@ func (e *Emulator) RunFrame() {
 	e.secondaryCycles.Store(0)
 	e.vdpLinesWalked.Store(0)
 	e.vdp2.ResetRotArm()
-	e.frameLineWidth = e.systemCyclesPerScanline
+	e.frameCyclesPerScanline = e.systemCyclesPerScanline
 	e.frameScanlines = e.scanlines
-	e.frameTotalCycles = int64(e.frameLineWidth) * int64(e.frameScanlines)
+	e.frameTotalCycles = int64(e.frameCyclesPerScanline) * int64(e.frameScanlines)
 	e.vdpWalkActiveLines = vdp2.ActiveLines()
-	e.vdpWalkActiveCyc = vdp2.ActiveSystemCyclesPerLine()
-	e.vdpWalkWidth = vdp2.ActiveWidth()
 
 	// Kick the VDP worker's frame walk. The workers are spawned by
 	// Start; RunFrame only kicks them.
@@ -191,7 +209,7 @@ func (e *Emulator) RunFrame() {
 	// gated on SSHEnabled per chunk.
 	e.secondaryJobCh <- struct{}{}
 
-	lineWidth := e.frameLineWidth
+	lineWidth := e.frameCyclesPerScanline
 	scanlines := e.frameScanlines
 	pos := int64(0)
 	for line := uint16(0); line < scanlines; line++ {
@@ -241,6 +259,9 @@ func (e *Emulator) RunFrame() {
 	// reaching the frame total; the walker's is the finished send.
 	spinWait(&e.secondaryCycles, e.frameTotalCycles)
 	<-e.vdpJobChFinished
+	if err := e.renderer.err(); err != nil {
+		e.rendererFailed(err)
+	}
 
 	// The frame's cycles are behind both CPUs: the next frame's positions
 	// start at zero, any overshoot carried in the counters.
@@ -291,109 +312,115 @@ func (e *Emulator) vdpWorker() {
 	}
 }
 
-// walkVDPFrame cycle-walks the frame in chunks of at most
-// tickChunkCycles, starting each line only after both CPUs have
-// completed it - VDP1 stays strictly behind the CPUs at line
-// granularity, with no waits inside the line. Per chunk it ticks VDP1
-// incremental command processing and streams the VDP2 row: the render
-// cursor follows the dot clock (one pixel per activeCyc/width cycles
-// of the line's active period), so each chunk renders the few pixels
-// the beam covered and the row completes as the active period ends.
-// Progress publishes once per line.
+// walkVDPFrame walks the frame a line at a time, starting each line
+// only after both CPUs have completed it - VDP1 stays strictly behind
+// the CPUs at line granularity, with no waits inside the line. Per
+// line it advances VDP1 incremental command processing by the line's
+// cycles, then renders the VDP2 row: the row's one render point is
+// the line's end, so the row reads VRAM and CRAM and the VDP1 frame
+// buffer after the whole line's draws have landed. Progress publishes
+// once per line.
 //
-// Frame events fire at their cycle positions:
+// Frame events fire at their line positions:
 //
-//	End of line 0 (the first H-blank IN after V-blank OUT): VDP1's
-//	FBCR latch point per manual Sec 4.2 - VBlankOut swap evaluation,
-//	deferred-register latch, the PTM=10 auto-draw gate, the VDP2
-//	frame-scoped sample (BeginFrame), and row 0's render in one
-//	burst from the post-change state.
+//	Start of line 1 (the first H-blank IN after V-blank OUT): VDP1's
+//	FBCR take-in point per manual Sec 4.2 - the VDP1 frame change
+//	(VBlankIn: deferred-register latch, swap or parity erase, EDSR),
+//	the VBlankOut manual-swap evaluation, the PTM=10 auto-draw gate,
+//	the VDP2 frame-scoped sample (BeginFrame), and row 0's render
+//	from the post-change state. Every register write the game makes
+//	during the vertical blank precedes this point, so the change acts
+//	on the last value written.
 //
-//	Each later active line's cycle 0: BeginLine - the row's register
-//	snapshot and per-line setup, and the VDP1 display-FB view, taken
+//	Start of each later active line: BeginLine - the row's register
+//	snapshot and per-line setup, and the VDP1 frame buffer view, taken
 //	together so the buffer choice and its pixel format stay coherent
-//	with the row's registers.
+//	with the row's registers, and the renderer's beginLine right after
+//	it, at the row's setup point. The row's render point at the line's
+//	end reads that buffer: the software renderer composites from it
+//	there, and the GPU renderer binds it at the frame's first row
+//	for its later composite. The buffer is the display buffer the
+//	frame change brought in, complete, and nothing draws into it
+//	during the display in any mode.
 //
-//	First vblank line, cycle 0: the manual-mode erase deferred from
-//	the PREVIOUS VBlankIn flushes - this frame's rows have
+//	Start of the first vblank line: the manual-mode erase deferred
+//	from this frame's change flushes - the frame's rows have
 //	composited, and per Sec.4.2 the erase-write progresses behind the
-//	beam during the displayed field - then VBlankIn fires (swap,
-//	BEF/CEF latch).
+//	beam during the displayed field.
 func (e *Emulator) walkVDPFrame() {
 	vdp1 := e.vdp1
 	vdp2 := e.vdp2
-	lineWidth := int64(e.frameLineWidth)
+	renderer := e.renderer
+	lineWidth := int64(e.frameCyclesPerScanline)
+	scanlines := int64(e.frameScanlines)
 	activeLines := int64(e.vdpWalkActiveLines)
-	cpp := int64(4)
-	if w := int64(e.vdpWalkWidth); w > 0 && int64(e.vdpWalkActiveCyc) >= w {
-		cpp = int64(e.vdpWalkActiveCyc) / w
-	}
 	fbView := func() vdp1FBView {
 		return vdp1FBView{
-			data:    vdp1.DisplayFB(vdp2.FrameFieldBit()),
+			data:    vdp1.DisplayFB(),
 			is8bpp:  vdp1.Is8bpp(),
 			width:   vdp1.FBWidth(),
 			height:  vdp1.FBHeight(),
 			rotated: vdp1.FBRotated(),
 		}
 	}
-	for pos := int64(0); pos < e.frameTotalCycles; {
-		line := pos / lineWidth
-		lineCyc := pos - line*lineWidth
-		if lineCyc == 0 {
-			// Line-boundary sync: walk this line only after both CPUs
-			// have completed it.
-			wait := pos + lineWidth
-			spinWait(&e.masterCycles, wait)
-			spinWait(&e.secondaryCycles, wait)
-			if line == 1 {
-				// First H-blank IN after V-blank OUT: VDP1's FBCR
-				// latch point. Per VDP1 manual Sec 4.2, FCM/FCT
-				// settings are to be made immediately after the
-				// V-blank OUT interrupt, and FBCR access is
-				// prohibited from the first H-blank IN after V-blank
-				// OUT until the next H-blank IN - the window in which
-				// VDP1 latches and processes the register. So the
-				// manual-change swap, the deferred-register latch,
-				// and the PTM=10 auto-draw gate evaluate here, one
-				// line after the interrupt: writes the V-blank OUT
-				// handler makes during line 0 are included, and the
-				// handler reads pre-swap state (e.g. EDSR.CEF) before
-				// the change lands. The changed display buffer
-				// applies to this field, so row 0 renders here in one
-				// burst from the post-change state; later rows
-				// stream along the dot clock.
-				vdp1.VBlankOut()
-				if vdp1.PTM() == 2 && vdp1.ConsumeFBSwap() {
-					vdp1.StartAutoDraw()
-				}
-				vdp2.BeginFrame()
-				if activeLines > 0 {
-					vdp2.BeginLine(0, fbView())
-					vdp2.RenderTo(int(e.vdpWalkWidth))
-				}
+	for line := int64(0); line < scanlines; line++ {
+		// Line-boundary sync: walk this line only after both CPUs
+		// have completed it.
+		wait := (line + 1) * lineWidth
+		e.waitLineEnd(wait, int(line))
+		if line == 1 {
+			// First H-blank IN after V-blank OUT: VDP1's FBCR
+			// latch point. Per VDP1 manual Sec 4.2, FCM/FCT
+			// settings are to be made immediately after the
+			// V-blank OUT interrupt, and FBCR access is
+			// prohibited from the first H-blank IN after V-blank
+			// OUT until the next H-blank IN - the window in which
+			// VDP1 latches and processes the register. So the
+			// frame change (VBlankIn), the manual-change swap,
+			// and the PTM=10 auto-draw gate evaluate here, one
+			// line after the interrupt: every write made during
+			// the vertical blank, including the V-blank OUT
+			// handler's during line 0, is included, and the
+			// handlers read pre-swap state (e.g. EDSR.CEF)
+			// before the change lands. The changed display buffer
+			// applies to this field, so row 0 renders here from
+			// the post-change state before this line's VDP1
+			// cycles run.
+			vdp1.VBlankIn()
+			vdp1.VBlankOut()
+			if vdp1.PTM() == 2 && vdp1.ConsumeFBSwap() {
+				vdp1.StartAutoDraw()
 			}
-			if line >= 1 && line < activeLines {
-				vdp2.BeginLine(int(line), fbView())
-			}
-			if line == activeLines {
-				vdp1.PerformLateErase()
-				vdp1.VBlankIn()
+			vdp2.BeginFrame()
+			renderer.beginFrame()
+			if activeLines > 0 {
+				beginRow(vdp2, renderer, 0, fbView())
+				renderer.renderLine(0)
 			}
 		}
-		next := pos + tickChunkCycles
-		if lineEnd := (line + 1) * lineWidth; next > lineEnd {
-			next = lineEnd
-		}
-		vdp1.TickSystemCycles(uint32(next - pos))
 		if line >= 1 && line < activeLines {
-			vdp2.RenderTo(int((next - line*lineWidth) / cpp))
+			beginRow(vdp2, renderer, int(line), fbView())
 		}
-		if next-(line*lineWidth) == lineWidth {
-			e.vdpLinesWalked.Store(line + 1)
+		if line == activeLines {
+			renderer.endDisplay()
+			vdp1.restartList()
+			vdp1.PerformLateErase()
 		}
-		pos = next
+		vdp1.TickSystemCycles(uint32(lineWidth))
+		renderer.vdp1Line(int(line))
+		if line >= 1 && line < activeLines {
+			renderer.renderLine(int(line))
+		}
+		e.vdpLinesWalked.Store(line + 1)
 	}
+	renderer.endFrame()
+}
+
+// beginRow prepares row y at its setup point: the VDP2's BeginLine,
+// then the renderer's beginLine, which reads the state BeginLine set.
+func beginRow(v *VDP2, r frameRenderer, y int, fb vdp1FBView) {
+	v.BeginLine(y, fb)
+	r.beginLine(y)
 }
 
 // secondaryWorker services one frame walk per kick, parking on the job
@@ -414,7 +441,7 @@ func (e *Emulator) secondaryWorker() {
 func (e *Emulator) walkSecondaryFrame() {
 	smpc := e.smpc
 	scsp := e.scsp
-	lineWidth := int64(e.frameLineWidth)
+	lineWidth := int64(e.frameCyclesPerScanline)
 	for pos := int64(0); pos < e.frameTotalCycles; {
 		// SMPC command-dispatch tick, once per scanline. The areaSMPC
 		// claim serializes it against register access. The System Manager

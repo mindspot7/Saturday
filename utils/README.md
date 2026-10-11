@@ -12,7 +12,8 @@ the emulator core and its UI dependencies, so it needs a display to
 run. `debugger` is the GUI client for `dev_runner`'s debug server; it
 needs a display but does not link the emulator core. `capture` links
 the emulator core but is fully headless (no display or audio), so it
-runs anywhere.
+runs anywhere. `dxil_gen` links the compute packages and the compile
+stage and runs the DirectX Shader Compiler as an external program.
 
 ## dev_runner
 
@@ -49,6 +50,12 @@ Additional keys:
 - 9 (dump top 20 PC histogram)
 - 8 (dump the current save state, exploded per field, to a
   `dump-YYYYMMDD-HHMMSS-mmm` directory)
+- 7 (toggle turbo: frames run unpaced until toggled off)
+- 6 (toggle a Go runtime execution trace: the first press starts
+  recording into a timestamped file in the working directory, the next
+  stops it; traces grow by several MB per second, so keep captures short)
+- Space (mark a screenshot point in the replay; only while recording
+  with `-record`)
 
 ### Debug server
 
@@ -174,6 +181,8 @@ Flags:
 | `-fast-boot` | false | Skip the real BIOS boot animation (real BIOS only; no effect with the HLE BIOS). |
 | `-out` | `capture_output` | Output root directory, created if missing. |
 | `-load-state` | (none) | Save state to load at startup; the replay must have been recorded from this state with the same disc and BIOS. |
+| `-renderer` | `gpu` | Renderer: `gpu` (exits if the GPU renderer cannot initialize) or `software`. |
+| `-upscale` | `1x` | Internal resolution: `1x` (native), `2x`, `4x`, `8x`, or `16x`. |
 
 Example:
 
@@ -212,6 +221,32 @@ frames far above realtime. If fewer than 10 frames complete in a one-second
 window the run is failing: no frame completing for two seconds is reported as
 frozen (with a goroutine stack dump), and a sustained sub-floor rate is
 reported as slow. A clean run exits 0 after the replay ends.
+
+## dxil_gen
+
+Compiles the compute packages to signed DXIL for the DX12 backend. It
+lowers the renderer's compute sources and the conformance sources,
+emits one HLSL source per entry point, runs the DirectX Shader Compiler
+on each, and writes the blobs into the directory the `dx12` package
+embeds. `make dxil` runs it; `make windows` runs it before the
+build. The compiler must have `dxil.dll` beside it so the blobs are
+signed, and an unsigned blob or one without a root signature is
+rejected. See `internal/hostgpu/dx12/dxil/README.md` for the compiler
+version CI pins and for compiling the sources by hand.
+
+Flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-dxc` | `dxc` | The DirectX Shader Compiler executable; empty writes the HLSL sources only |
+| `-hlsl` | `build/hlsl` | Output directory for the HLSL sources, one subdirectory per set |
+| `-out` | `internal/hostgpu/dx12/dxil` | Output directory for the blobs, one subdirectory per set |
+
+Example:
+
+```
+go run ./utils/dxil_gen -dxc "" -hlsl build/hlsl
+```
 
 ## statedump
 

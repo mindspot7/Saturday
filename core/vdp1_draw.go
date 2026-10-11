@@ -3,23 +3,28 @@
 
 package core
 
-// vdp1FBStride is the default framebuffer width for TVM=000 (normal 16-bit).
-// Used by test helpers. Drawing code uses v.fbWidth() for TVM-aware stride.
-const vdp1FBStride = 512
+import (
+	"github.com/user-none/erings/core/compute"
+	"github.com/user-none/erings/core/compute/draw"
+)
 
-// VBlankIn handles frame buffer lifecycle at the VBlank boundary.
-// Called once per field. Handles erase and/or swap based on FBCR
-// (FCM/FCT) and TVMR (VBE). Also updates EDSR BEF/CEF.
+// VBlankIn is the frame change: it handles the frame buffer lifecycle
+// once per field, at the first H-blank IN after V-blank OUT where the
+// VDP1 takes the change mode register in (manual Sec 4.2), so every
+// register write made during the vertical blank is in force. Handles
+// erase and/or swap based on FBCR (FCM/FCT) and TVMR (VBE). Also
+// updates EDSR BEF/CEF.
 //
-// Under DIE=1 (double-density interlace draw mode) the buffers are
-// pinned to fixed parity roles (drawFB=even, displayFB=odd) and the
-// 1-cycle swap is suppressed. Erase clears only the DIL-matched FB so
-// the OTHER field's previous draw is preserved for VDP2 composite this
-// field.
+// Double interlace (DIE=1) takes the same paths: per manual Sec 4.2
+// the fields are changed every 1/60 second with FCM=FCT=0, so the
+// buffers swap every field, the buffer brought in for drawing is
+// erased, and the displayed buffer is the previous field's completed
+// draw. DIL only selects the parity of the doubled Y range the draw
+// lands on (pixelParams).
 func (v *VDP1) VBlankIn() {
 	// Latch shadow registers into active per VDP1 manual Sec.3. Fires
-	// every vblank-IN, regardless of whether the swap branches below
-	// actually swap. Subsequent swap/erase/EDSR logic in this function
+	// every frame change, regardless of whether the swap branches
+	// below actually swap. Subsequent swap/erase/EDSR logic in this function
 	// reads the post-latch values.
 	v.latchPending()
 
@@ -29,33 +34,6 @@ func (v *VDP1) VBlankIn() {
 	if v.vbeLatched {
 		vbe = 0x08
 		v.vbeLatched = false
-	}
-
-	if v.dieEnabled() {
-		target := v.drawFB
-		if v.dilOdd() {
-			target = v.displayFB
-		}
-		// Spec mandates FCM=FCT=0 (1-cycle) under DIE=1, which erases
-		// the draw target each field. Honor FCM=1 manual erase
-		// defensively if a game violates the spec; never swap under
-		// DIE=1 regardless of FCM/FCT/VBE.
-		if fcm == 0 || fct == 0 {
-			v.eraseFrameBuffer(target)
-		}
-		// Per Sec.4.2 "fields are changed every 1/60 second" under
-		// DIE; each field is a frame-change for PTM=10 purposes even
-		// though buffer pointers stay pinned. Mark for the gate so
-		// the auto-trigger fires every field.
-		v.fbSwapped = true
-		v.swapCount++
-		// EDSR transition at field change under DIE=1: BEF latches
-		// the prior CEF per manual Sec 4.6. CEF itself is left
-		// untouched - the spec specifies CEF clears at "drawing
-		// started", which startDraw handles when the PTM=10
-		// auto-trigger fires.
-		v.edsr = (v.edsr & 0x02) | ((v.edsr >> 1) & 0x01)
-		return
 	}
 
 	if fcm == 0 {
@@ -141,10 +119,6 @@ func (v *VDP1) VBlankIn() {
 // made by the vbout handler. FCM=0 auto-swap is never handled here;
 // it is fully owned by VBlankIn.
 func (v *VDP1) VBlankOut() {
-	if v.dieEnabled() {
-		return
-	}
-
 	if v.fbcr&0x02 == 0 || v.fbcr&0x01 == 0 {
 		return
 	}
@@ -249,6 +223,10 @@ func (v *VDP1) TickSystemCycles(cycles uint32) {
 	}
 
 	consumed, endBit := v.processCommands(budget)
+	// The tick is the list's unit: the command in progress closes its
+	// entry here, so the list holds only complete entries between
+	// ticks and every event taken between ticks lands between them.
+	v.closeEntry()
 	if consumed > budget {
 		v.systemCycleDebt = consumed - budget
 	}
@@ -259,11 +237,13 @@ func (v *VDP1) TickSystemCycles(cycles uint32) {
 	}
 }
 
-// eraseFrameBuffer fills the erase region of the given buffer with EWDR.
-// In 16-bit modes, X coordinates are in 8-pixel units and each pixel is
-// erased with the full 16-bit EWDR value. In 8-bit modes, X coordinates
-// are in 16-pixel units and EWDR bits 15:8 fill even X pixels while
-// bits 7:0 fill odd X pixels.
+// eraseFrameBuffer fills the erase region of the given buffer with
+// EWDR: the region is resolved from EWLR and EWRR into an erase op
+// and filled through the compute package's EraseRows. In 16-bit
+// modes, X coordinates are in
+// 8-pixel units and each pixel is erased with the full 16-bit EWDR
+// value. In 8-bit modes, X coordinates are in 16-pixel units and
+// EWDR bits 15:8 fill even X pixels while bits 7:0 fill odd X pixels.
 func (v *VDP1) eraseFrameBuffer(target []byte) {
 	bpp8 := v.is8bpp()
 	w := v.fbWidth()
@@ -303,30 +283,80 @@ func (v *VDP1) eraseFrameBuffer(target []byte) {
 	if y3 >= h {
 		y3 = h - 1
 	}
+	if x1 > x3 || y1 > y3 {
+		return
+	}
 
-	hi := uint8(v.ewdr >> 8)
-	lo := uint8(v.ewdr)
+	op := draw.DrawOp{Kind: draw.OpErase, Color: uint32(v.ewdr)}
+	op.Pixel.FBWidth = int32(w)
+	op.Pixel.FBHeight = int32(h)
+	op.Pixel.Is8bpp = bpp8
+	op.X[0], op.Y[0] = int32(x1), int32(y1)
+	op.X[2], op.Y[2] = int32(x3), int32(y3)
+	v.appendOp(&op, target)
+	if !v.pairKept.Load() {
+		// The erase reaches the device as the entry; the CPU pair
+		// is not kept.
+		return
+	}
+	var st draw.DrawState
+	b := draw.Buffers{VRAM: (*compute.VDP1VRAM)(v.vram), FB: compute.VDP1FB(target), Records: v.lineRecords}
+	draw.Draw(&b, &op, &st)
+}
 
-	if bpp8 {
-		for y := y1; y <= y3; y++ {
-			for x := x1; x <= x3; x++ {
-				offset := y*w + x
-				if x&1 == 0 {
-					target[offset] = hi
-				} else {
-					target[offset] = lo
-				}
-			}
-		}
-	} else {
-		for y := y1; y <= y3; y++ {
-			for x := x1; x <= x3; x++ {
-				offset := (y*w + x) * 2
-				target[offset] = hi
-				target[offset+1] = lo
-			}
+// drawResume is the drawing command in progress: the op the walk
+// resolved, its color calculation bits for the cycle costs, and its
+// progress through Draw.
+type drawResume struct {
+	op draw.DrawOp
+	cc uint16
+	st draw.DrawState
+}
+
+// beginDraw takes the resolved op as the command in progress,
+// reserves its line records, and starts drawing it against the
+// budget.
+func (v *VDP1) beginDraw(cmd *vdp1Command, budget int32) (consumed int32, done bool) {
+	d := &v.cmd
+	d.cc = cmd.pmod & 0x07
+	d.st = draw.DrawState{PixCycles: vdp1PixelCycles(d.cc), Timing: !v.pairKept.Load()}
+	v.reserveRecords(&d.op)
+	v.cmdPhase = phaseDraw
+	return v.runDraw(budget)
+}
+
+// runDraw draws the command in progress through Draw against the
+// budget, and yields with cmdPhase set when the
+// budget is reached, with the command's entry in the frame's list
+// opened from the walk's position when none is open. The walk runs
+// the store pass, which reads no round state. On completion the table
+// reads over the VRAM port are charged, an approximation of their
+// setup-time cost: the Gouraud shading table when the color
+// calculation shades, and the CLUT of a sprite in color mode 1.
+func (v *VDP1) runDraw(budget int32) (consumed int32, done bool) {
+	d := &v.cmd
+	if !v.cmdOpen {
+		v.openEntry()
+	}
+	d.st.Budget = budget
+	b := draw.Buffers{VRAM: (*compute.VDP1VRAM)(v.vram), FB: compute.VDP1FB(v.drawFB), Records: v.lineRecords}
+	draw.Draw(&b, &d.op, &d.st)
+	cycles := d.st.Cycles
+	if !d.st.Done {
+		return cycles, false
+	}
+	v.cmdOpen = false
+	v.cmdPhase = phaseIdle
+	if d.cc >= 4 {
+		cycles += vdp1GouraudWords * vdp1VRAMPortWordCycles
+	}
+	switch d.op.Kind {
+	case draw.OpNormalSprite, draw.OpScaledSprite, draw.OpDistortedSprite:
+		if d.op.ColorMode == 1 {
+			cycles += vdp1CLUTWords * vdp1VRAMPortWordCycles
 		}
 	}
+	return cycles, true
 }
 
 // processCommands consumes up to `budget` system cycles of pending
@@ -456,34 +486,18 @@ func (v *VDP1) advanceProcAddrAfterCmd(cmd *vdp1Command) {
 	}
 }
 
-// resumeCommand re-enters the rasterizer matching the current
-// cmdPhase to continue an in-progress command. Returns done=true
-// when the command completes, at which point cmdPhase is cleared
-// inside the per-type resume helper.
+// resumeCommand continues the drawing command in progress from its
+// draw state. Returns done=true when the command completes, at which
+// point cmdPhase is idle.
 //
-// Per-command rasterizers follow a startX / resumeX / runX
-// pattern. startX runs setup once on a fresh command (charAddr,
-// clip bounds, gouraud table, edge initialization) and stashes
-// it on the matching resume struct. runX walks the iterator in
-// chunks of pixelsPerYieldChunk and yields when the per-call
-// budget is reached, leaving cmdPhase non-zero. resumeX
-// continues the run from saved state. On completion any
-// per-command tail cycle adders are charged and cmdPhase is
-// reset to phaseIdle.
+// Each drawing command's startX resolves the command into its draw
+// op and enters beginDraw; the op's lines then run through Draw, the
+// compute package's one loop over its setup and span functions, which
+// check the budget every draw.YieldChunk dots and yield when
+// the per-call budget is reached, leaving cmdPhase at phaseDraw.
 func (v *VDP1) resumeCommand(budget int32) (consumed int32, done bool) {
-	switch v.cmdPhase {
-	case phaseNormalSprite:
-		return v.resumeNormalSprite(budget)
-	case phaseScaledSprite:
-		return v.resumeScaledSprite(budget)
-	case phaseDistortedSprite:
-		return v.resumeDistortedSprite(budget)
-	case phasePolygon:
-		return v.resumePolygon(budget)
-	case phasePolyline:
-		return v.resumePolyline(budget)
-	case phaseLine:
-		return v.resumeLine(budget)
+	if v.cmdPhase == phaseDraw {
+		return v.runDraw(budget)
 	}
 	v.cmdPhase = phaseIdle
 	return 0, true

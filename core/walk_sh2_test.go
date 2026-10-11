@@ -275,7 +275,7 @@ func TestWalkHaltedMasterWokenBySCUInterrupt(t *testing.T) {
 
 	f.runFrames(1)
 
-	vbl := uint64(e.vdp2.activeLines) * uint64(e.frameLineWidth)
+	vbl := uint64(e.vdp2.activeLines) * uint64(e.frameCyclesPerScanline)
 	for i, r := range f.master {
 		if r.op != 0xFFFF {
 			continue
@@ -416,7 +416,7 @@ func TestWalkSlaveEnabledMidFrame(t *testing.T) {
 		t.Fatal("COMREG write not traced")
 	}
 	total := uint64(e.frameTotalCycles)
-	lineWidth := uint64(e.frameLineWidth)
+	lineWidth := uint64(e.frameCyclesPerScanline)
 	if len(f.slave) == 0 {
 		t.Fatal("slave executed no instructions")
 	}

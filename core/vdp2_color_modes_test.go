@@ -1,6 +1,8 @@
 package core
 
-import "testing"
+import (
+	"testing"
+)
 
 // TestRenderNBG_16MColorCell verifies the NBG cell path in the 16,770,000
 // color format (CHCTLA N0CHCN=100): a 32-bit dot whose MSB is set renders
@@ -23,7 +25,7 @@ func TestRenderNBG_16MColorCell(t *testing.T) {
 	v.vram[0x8000], v.vram[0x8001], v.vram[0x8002], v.vram[0x8003] = 0x80, 0x10, 0x20, 0x30
 	v.vram[0x8004], v.vram[0x8005], v.vram[0x8006], v.vram[0x8007] = 0x00, 0x10, 0x20, 0x30
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRGB(t, v, buf, 0, 0, 0x30, 0x20, 0x10, "16M cell opaque dot")
 	expectTransparent(t, v, buf, 1, 0, "16M cell MSB-clear dot")
@@ -47,7 +49,7 @@ func TestRenderNBG_16MColorBitmap(t *testing.T) {
 	v.vram[0], v.vram[1], v.vram[2], v.vram[3] = 0x80, 0x10, 0x20, 0x30
 	v.vram[4], v.vram[5], v.vram[6], v.vram[7] = 0x00, 0x10, 0x20, 0x30
 
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestNBG(v, 0, buf)
 	expectRGB(t, v, buf, 0, 0, 0x30, 0x20, 0x10, "16M bitmap opaque dot")
 	expectTransparent(t, v, buf, 1, 0, "16M bitmap MSB-clear dot")
@@ -63,10 +65,11 @@ func TestRenderNBG_16MColorBitmap(t *testing.T) {
 // high byte and R in its low byte, the high word holds B in its low byte.
 func TestCRAMMode2RenderedColor(t *testing.T) {
 	v := setupThreeNBGLayers(t, 5, 0, 0)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2RAMCTL] = 0x2000
 	// NBG0 dot 10: entry 10 at byte 40.
 	v.cram[40], v.cram[41] = 0x00, 0x40 // high word: B = 0x40
 	v.cram[42], v.cram[43] = 0x80, 0xC0 // low word: G = 0x80, R = 0xC0
-	renderTestFrame(v)
-	expectOut(t, v, 0, 0, 0xC0, 0x80, 0x40, 0, "CRAM mode 2 entry")
+	renderTestFrame(v, swr)
+	expectOut(t, v, swr, 0, 0, 0xC0, 0x80, 0x40, 0, "CRAM mode 2 entry")
 }

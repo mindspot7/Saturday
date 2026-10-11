@@ -83,6 +83,23 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install make
 
+      - name: Install DirectX Shader Compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Pinned release; the archive holds dxc.exe with dxil.dll beside
+          # it, which signs the compiled shaders. The x64 directory serves
+          # both runners: its arm64 directory pairs a classic ARM64 dxc.exe
+          # with ARM64EC DLLs, which that process cannot load, while the
+          # x64 build runs under emulation on the ARM64 runner. The DXIL
+          # is the same from either.
+          ver=v1.9.2607
+          sha256=a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241
+          curl -fL -o dxc.zip "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$ver/dxc_2026_07_29.zip"
+          echo "$sha256  dxc.zip" | sha256sum -c -
+          powershell -Command "Expand-Archive -Path dxc.zip -DestinationPath C:\\dxc -Force"
+          echo "C:\\dxc\\bin\\x64" >> "$GITHUB_PATH"
+
       - name: Install ARM64 C toolchain (Windows ARM64)
         if: runner.os == 'Windows' && runner.arch == 'ARM64'
         shell: bash

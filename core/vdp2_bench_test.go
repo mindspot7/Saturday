@@ -11,13 +11,15 @@ import (
 // VDP2 render benchmarks. Every scene is programmed through the
 // bus-facing entry points (Write, WriteVRAM, WriteCRAM, and the VDP1
 // framebuffer writes for the sprite layer) and rendered through the
-// frame loop's per-line sequence (BeginFrame, BeginLine, RenderTo,
-// EndLine, EndFrame). Nothing here names a renderer-internal function,
-// so the numbers stay comparable across refactors of the renderer.
+// frame loop's per-line sequence (renderFrame: BeginFrame, then per
+// line beginRow and the render point, then the display and frame
+// ends). Nothing here names a renderer-internal function, so the
+// numbers stay comparable across refactors of the renderer.
 //
 // Each benchmark reports nanoseconds per output pixel, which stays
 // comparable across display widths and interlace modes; ns/op is the
-// per-frame cost.
+// per-frame cost. Every scene renders each row in one RenderTo call,
+// as the frame loop does at the line's end.
 //
 // TestBenchVDP2Scenes pins every scene's output. A benchmark number is
 // comparable with an earlier one only while that test passes: a scene
@@ -343,7 +345,7 @@ func benchRBG1Cell(v *VDP2, pri uint16) {
 // frame loop does.
 func benchFBView(v1 *VDP1) vdp1FBView {
 	return vdp1FBView{
-		data:    v1.DisplayFB(0),
+		data:    v1.DisplayFB(),
 		is8bpp:  v1.Is8bpp(),
 		width:   v1.FBWidth(),
 		height:  v1.FBHeight(),
@@ -439,9 +441,11 @@ func benchWindowW0(v *VDP2) {
 }
 
 // benchWindowsW0W1Sprite adds W1 at x 100-300, y 50-200 to the W0
-// scene: NBG1 takes W0 AND W1, NBG2 W0 OR W1, NBG3 the sprite window.
+// scene: NBG1 takes W0 AND W1, NBG2 W0 OR W1, NBG3 the sprite window,
+// enabled by SPWINEN so the frame buffer MSB is the window bit.
 func benchWindowsW0W1Sprite(v *VDP2) {
 	benchWindowW0(v)
+	benchReg(v, vdp2SPCTL, 0x0010)
 	benchReg(v, vdp2WPSX1, 200)
 	benchReg(v, vdp2WPEX1, 600)
 	benchReg(v, vdp2WPSY1, 50)
@@ -508,7 +512,6 @@ func benchCompositeFeatures(v *VDP2) {
 type benchVDP2Scene struct {
 	name  string
 	build func() (*VDP2, vdp1FBView)
-	spans int // RenderTo calls per line
 }
 
 // benchSixLayersTVMD is the windowed six-layer scene under another
@@ -539,11 +542,11 @@ func benchVDP2Scenes() []benchVDP2Scene {
 		}
 	}
 	return []benchVDP2Scene{
-		{name: "NBG0 cell 4bpp", build: single(benchNBG0Cell4), spans: 1},
-		{name: "NBG0 cell 8bpp", build: single(benchNBG0Cell8), spans: 1},
-		{name: "NBG0 cell 32K", build: single(benchNBG0Cell32K), spans: 1},
-		{name: "NBG2 cell 8bpp 1-word", build: single(benchNBG2Cell8OneWord), spans: 1},
-		{name: "NBG0 bitmap 8bpp", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "NBG0 cell 4bpp", build: single(benchNBG0Cell4)},
+		{name: "NBG0 cell 8bpp", build: single(benchNBG0Cell8)},
+		{name: "NBG0 cell 32K", build: single(benchNBG0Cell32K)},
+		{name: "NBG2 cell 8bpp 1-word", build: single(benchNBG2Cell8OneWord)},
+		{name: "NBG0 bitmap 8bpp", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchRegOr(v, vdp2BGON, 0x0001)
 			benchReg(v, vdp2CHCTLA, 0x0012)
@@ -553,7 +556,7 @@ func benchVDP2Scenes() []benchVDP2Scene {
 			benchBitmap8(v, 3*0x20000)
 			return v, vdp1FBView{}
 		}},
-		{name: "NBG0 bitmap 32K", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "NBG0 bitmap 32K", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchRegOr(v, vdp2BGON, 0x0001)
 			benchReg(v, vdp2CHCTLA, 0x0032)
@@ -563,7 +566,7 @@ func benchVDP2Scenes() []benchVDP2Scene {
 			benchBitmap32K(v, 2*0x20000)
 			return v, vdp1FBView{}
 		}},
-		{name: "NBG0 line scroll vertical cell scroll", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "NBG0 line scroll vertical cell scroll", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchNBG0Cell8(v, 1)
 			benchReg(v, vdp2SCRCTL, 0x000F)
@@ -586,13 +589,13 @@ func benchVDP2Scenes() []benchVDP2Scene {
 			}
 			return v, vdp1FBView{}
 		}},
-		{name: "NBG0 mosaic", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "NBG0 mosaic", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchNBG0Cell8(v, 1)
 			benchReg(v, vdp2MZCTL, 0x3301)
 			return v, vdp1FBView{}
 		}},
-		{name: "four NBG layers", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "four NBG layers", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchNBG0Cell4(v, 7)
 			benchNBG1Cell8(v, 6)
@@ -600,89 +603,129 @@ func benchVDP2Scenes() []benchVDP2Scene {
 			benchNBG3Cell4(v, 4)
 			return v, vdp1FBView{}
 		}},
-		{name: "RBG0 cell", build: single(benchRBG0Cell), spans: 1},
-		{name: "RBG0 cell coefficients", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "RBG0 cell", build: single(benchRBG0Cell)},
+		{name: "RBG0 cell coefficients", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchRBG0Cell(v, 1)
 			benchRBG0Coefficients(v)
 			return v, vdp1FBView{}
 		}},
-		{name: "RBG0 bitmap 8bpp", build: single(benchRBG0Bitmap8), spans: 1},
-		{name: "RBG1 over RBG0", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "RBG0 bitmap 8bpp", build: single(benchRBG0Bitmap8)},
+		{name: "RBG1 over RBG0", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchRBG0Cell(v, 1)
 			benchRBG1Cell(v, 2)
 			return v, vdp1FBView{}
 		}},
-		{name: "sprite 16-bit", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "sprite 16-bit", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchSpriteRegs(v)
 			return v, benchSpriteFB16()
 		}},
-		{name: "sprite 8-bit", spans: 1, build: func() (*VDP2, vdp1FBView) {
+		{name: "sprite 8-bit", build: func() (*VDP2, vdp1FBView) {
 			v := benchVDP2()
 			benchSpriteRegs(v)
 			benchReg(v, vdp2SPCTL, 0x0008)
 			return v, benchSpriteFB8()
 		}},
-		{name: "six layers", build: benchSixLayers, spans: 1},
-		{name: "six layers W0", build: sixWith(benchWindowW0), spans: 1},
-		{name: "six layers W0 W1 sprite window", build: sixWith(benchWindowsW0W1Sprite), spans: 1},
-		{name: "six layers line windows", build: sixWith(benchLineWindows), spans: 1},
-		{name: "six layers composite features", build: sixWith(benchCompositeFeatures), spans: 1},
-		{name: "six layers 4 spans", build: sixWith(benchWindowsW0W1Sprite), spans: 4},
-		{name: "six layers hi-res 640", build: benchSixLayersTVMD(0x8002, false), spans: 1},
-		{name: "six layers LSMD3", build: benchSixLayersTVMD(0x80C0, false), spans: 1},
-		{name: "six layers 352", build: benchSixLayersTVMD(0x8001, false), spans: 1},
-		{name: "six layers PAL 256", build: benchSixLayersTVMD(0x8020, true), spans: 1},
+		{name: "six layers", build: benchSixLayers},
+		{name: "six layers W0", build: sixWith(benchWindowW0)},
+		{name: "six layers W0 W1 sprite window", build: sixWith(benchWindowsW0W1Sprite)},
+		{name: "six layers line windows", build: sixWith(benchLineWindows)},
+		{name: "six layers composite features", build: sixWith(benchCompositeFeatures)},
+		{name: "six layers hi-res 640", build: benchSixLayersTVMD(0x8002, false)},
+		{name: "six layers LSMD3", build: benchSixLayersTVMD(0x80C0, false)},
+		{name: "six layers 352", build: benchSixLayersTVMD(0x8001, false)},
+		{name: "six layers PAL 256", build: benchSixLayersTVMD(0x8020, true)},
 	}
 }
 
-// benchRenderVDP2Frame renders one frame the way the frame loop does:
-// BeginFrame, then per line BeginLine, RenderTo in spans pieces, and
-// EndLine, then EndFrame.
-func benchRenderVDP2Frame(v *VDP2, fb vdp1FBView, spans int) {
-	v.BeginFrame()
-	width := int(v.ActiveWidth())
-	lines := int(v.ActiveLines())
-	for y := 0; y < lines; y++ {
-		v.BeginLine(y, fb)
-		for s := 1; s <= spans; s++ {
-			v.RenderTo(width * s / spans)
-		}
-		v.EndLine()
-	}
-	v.EndFrame()
-}
-
+// BenchmarkVDP2 runs every scene under both renderers. The software
+// sub-benchmark is the frame as the walker renders it. The gpu
+// sub-benchmark is the frame as the walker drives it with the GPU
+// renderer: the same per-line calls through the renderer's points in
+// the frame loop's positions, beginFrame after BeginFrame, renderLine
+// after each BeginLine, endDisplay after the last line, endFrame
+// after the frame, which waits for the frame the frontend reads. It
+// reports the time of the renderLine and endDisplay calls on their
+// own, the page takes, batch uploads, and submissions that run on the
+// walker. Without a device it skips.
 func BenchmarkVDP2(b *testing.B) {
 	for _, s := range benchVDP2Scenes() {
 		b.Run(s.name, func(b *testing.B) {
-			v, fb := s.build()
-			// The first frame after a mode change blanks the output and
-			// the vertical counters load from the frame-end capture, so
-			// one warm-up frame puts every iteration on the same path.
-			benchRenderVDP2Frame(v, fb, s.spans)
-			pixels := uint64(v.ActiveWidth()) * uint64(v.ActiveLines())
-			b.ReportAllocs()
-			b.ResetTimer()
-			start := time.Now()
-			for i := 0; i < b.N; i++ {
-				benchRenderVDP2Frame(v, fb, s.spans)
-			}
-			elapsed := time.Since(start)
-			b.ReportMetric(float64(elapsed.Nanoseconds())/float64(uint64(b.N)*pixels), "ns/pixel")
+			b.Run("software", func(b *testing.B) {
+				v, fb := s.build()
+				r := newSoftwareRenderer(v)
+				// The first frame after a mode change blanks the output and
+				// the vertical counters load from the frame-end capture, so
+				// one warm-up frame puts every iteration on the same path.
+				renderFrame(v, r, fb, nil)
+				pixels := uint64(v.ActiveWidth()) * uint64(v.ActiveLines())
+				b.ReportAllocs()
+				b.ResetTimer()
+				start := time.Now()
+				for i := 0; i < b.N; i++ {
+					renderFrame(v, r, fb, nil)
+				}
+				elapsed := time.Since(start)
+				b.ReportMetric(float64(elapsed.Nanoseconds())/float64(uint64(b.N)*pixels), "ns/pixel")
+			})
+			b.Run("gpu", func(b *testing.B) {
+				v, fb := s.build()
+				g, err := openGPURenderer(v, NewVDP1(NewSCU()))
+				if err != nil {
+					b.Skip(err)
+				}
+				defer g.close()
+				renderFrame(v, g, fb, nil)
+				submitTime := time.Duration(0)
+				frame := func() {
+					v.BeginFrame()
+					g.beginFrame()
+					lines := int(v.ActiveLines())
+					for y := 0; y < lines; y++ {
+						beginRow(v, g, y, fb)
+						start := time.Now()
+						g.renderLine(y)
+						submitTime += time.Since(start)
+						v.EndLine()
+					}
+					v.EndFrame()
+					start := time.Now()
+					g.endDisplay()
+					submitTime += time.Since(start)
+					g.endFrame()
+				}
+				frame()
+				if err := g.err(); err != nil {
+					b.Fatal(err)
+				}
+				pixels := uint64(v.ActiveWidth()) * uint64(v.ActiveLines())
+				b.ReportAllocs()
+				b.ResetTimer()
+				submitTime = 0
+				start := time.Now()
+				for i := 0; i < b.N; i++ {
+					frame()
+				}
+				elapsed := time.Since(start)
+				if err := g.err(); err != nil {
+					b.Fatal(err)
+				}
+				b.ReportMetric(float64(elapsed.Nanoseconds())/float64(uint64(b.N)*pixels), "ns/pixel")
+				b.ReportMetric(float64(submitTime.Microseconds())/float64(b.N), "submit-us/op")
+			})
 		})
 	}
 }
 
 // benchCheckContent fails when a rendered frame is mostly blank or
 // nearly uniform, which would make the scene's cost meaningless.
-func benchCheckContent(t *testing.T, v *VDP2) {
+func benchCheckContent(t *testing.T, v *VDP2, r *softwareRenderer) {
 	t.Helper()
 	w := int(v.ActiveWidth())
 	h := v.DisplayHeight()
-	fb := v.Framebuffer()
+	fb := r.framebuffer()
 	colors := make(map[uint32]struct{})
 	lit := 0
 	for y := 0; y < h; y++ {
@@ -710,10 +753,11 @@ func TestBenchVDP2Scenes(t *testing.T) {
 	for _, s := range benchVDP2Scenes() {
 		t.Run(s.name, func(t *testing.T) {
 			v, fb := s.build()
-			benchRenderVDP2Frame(v, fb, s.spans)
-			benchRenderVDP2Frame(v, fb, s.spans)
-			benchCheckContent(t, v)
-			checkBands(t, s.name, vdp2BandHashes(v), benchVDP2Pins[s.name], describeVDP2Band(v))
+			r := newSoftwareRenderer(v)
+			renderFrame(v, r, fb, nil)
+			renderFrame(v, r, fb, nil)
+			benchCheckContent(t, v, r)
+			checkBands(t, s.name, vdp2BandHashes(v, r), benchVDP2Pins[s.name], describeVDP2Band(v, r))
 		})
 	}
 }
@@ -721,158 +765,152 @@ func TestBenchVDP2Scenes(t *testing.T) {
 // benchVDP2Pins is the recorded band hash table per scene.
 var benchVDP2Pins = map[string][]uint32{
 	"NBG0 cell 4bpp": {
-		0x878F329B, 0x265E772B, 0x2B592DCD, 0x242AADD5, 0xF8AFE397, 0x5911C4FB, 0x0F908AF2,
-		0x23C97875, 0xC0B83A60, 0x5A48C113, 0x880C3EB3, 0x3F1141A3, 0x32D122ED, 0x7A45CA38,
-		0x0E988872, 0x02C0BC2B, 0xFB905B36, 0x4929C83B, 0x275E4EBF, 0xDC2917AD, 0x294AB083,
-		0x6DFCB58C, 0x4758CC79, 0x54FB9479, 0x878F329B, 0x265E772B, 0x2B592DCD, 0x242AADD5,
+		0xBB187A3D, 0x8911DD0D, 0xDA827F4D, 0x5DC9D55D, 0xCCDC267D, 0x8C57E40D, 0x4E9A4E25,
+		0x0E243B15, 0xC9F66215, 0x3340566D, 0x410E2705, 0xF561A415, 0xDE20CBAD, 0x3BF10FE5,
+		0x6CE6B1CD, 0xC50F7905, 0xF5BFEB05, 0x8A90CD4D, 0x437E2D05, 0x2BF2D565, 0x542C339D,
+		0x9BCE31C5, 0xB1162925, 0x24217D7D, 0xBB187A3D, 0x8911DD0D, 0xDA827F4D, 0x5DC9D55D,
 	},
 	"NBG0 cell 8bpp": {
-		0x37E5D2B6, 0x21CD80F6, 0x2C8D257A, 0xC04D5F3A, 0xA51A4F9E, 0x939373EA, 0x30254022,
-		0x4996CF1E, 0x37E5D2B6, 0x21CD80F6, 0x2C8D257A, 0xC04D5F3A, 0xA51A4F9E, 0x939373EA,
-		0x30254022, 0x4996CF1E, 0x37E5D2B6, 0x21CD80F6, 0x2C8D257A, 0xC04D5F3A, 0xA51A4F9E,
-		0x939373EA, 0x30254022, 0x4996CF1E, 0x37E5D2B6, 0x21CD80F6, 0x2C8D257A, 0xC04D5F3A,
+		0xEB79A1CD, 0x8DD1F25D, 0xB4CB30ED, 0xCF916CBD, 0x7EEF008D, 0x9690FABD, 0x2B81236D,
+		0xDB7E377D, 0xEB79A1CD, 0x8DD1F25D, 0xB4CB30ED, 0xCF916CBD, 0x7EEF008D, 0x9690FABD,
+		0x2B81236D, 0xDB7E377D, 0xEB79A1CD, 0x8DD1F25D, 0xB4CB30ED, 0xCF916CBD, 0x7EEF008D,
+		0x9690FABD, 0x2B81236D, 0xDB7E377D, 0xEB79A1CD, 0x8DD1F25D, 0xB4CB30ED, 0xCF916CBD,
 	},
 	"NBG0 cell 32K": {
-		0x6D2554B0, 0x10655D2A, 0x6EBB3F04, 0x78A64836, 0x18B5A030, 0xB6C26336, 0x5CF2ADD8,
-		0x3AFAA836, 0x6D2554B0, 0x10655D2A, 0x6EBB3F04, 0x78A64836, 0x18B5A030, 0xB6C26336,
-		0x5CF2ADD8, 0x3AFAA836, 0x6D2554B0, 0x10655D2A, 0x6EBB3F04, 0x78A64836, 0x18B5A030,
-		0xB6C26336, 0x5CF2ADD8, 0x3AFAA836, 0x6D2554B0, 0x10655D2A, 0x6EBB3F04, 0x78A64836,
+		0x6DD50C15, 0x78EE5EF5, 0xEBFC7E35, 0xFF224CD5, 0x604579F5, 0xCB9B5775, 0x34B38C15,
+		0xA04CABB5, 0x6DD50C15, 0x78EE5EF5, 0xEBFC7E35, 0xFF224CD5, 0x604579F5, 0xCB9B5775,
+		0x34B38C15, 0xA04CABB5, 0x6DD50C15, 0x78EE5EF5, 0xEBFC7E35, 0xFF224CD5, 0x604579F5,
+		0xCB9B5775, 0x34B38C15, 0xA04CABB5, 0x6DD50C15, 0x78EE5EF5, 0xEBFC7E35, 0xFF224CD5,
 	},
 	"NBG2 cell 8bpp 1-word": {
-		0xE2CFE401, 0x1B5FF3ED, 0x54F9E7B1, 0x6608F17D, 0x72B6CE0D, 0xBB8C50CD, 0xCE99A799,
-		0xB6E61069, 0xF86C5E35, 0x1B5FF3ED, 0x54F9E7B1, 0x6608F17D, 0x72B6CE0D, 0xBB8C50CD,
-		0xCE99A799, 0xB6E61069, 0xF86C5E35, 0x1B5FF3ED, 0x54F9E7B1, 0x6608F17D, 0x72B6CE0D,
-		0xBB8C50CD, 0xCE99A799, 0xB6E61069, 0xF86C5E35, 0x1B5FF3ED, 0x54F9E7B1, 0x6608F17D,
+		0xDB3336C5, 0xF88BC7FD, 0x3DCD111D, 0x30516FBD, 0x65AC9E5D, 0xF6EA31DD, 0x98E5D97D,
+		0x33F5DFDD, 0x7119081D, 0xF88BC7FD, 0x3DCD111D, 0x30516FBD, 0x65AC9E5D, 0xF6EA31DD,
+		0x98E5D97D, 0x33F5DFDD, 0x7119081D, 0xF88BC7FD, 0x3DCD111D, 0x30516FBD, 0x65AC9E5D,
+		0xF6EA31DD, 0x98E5D97D, 0x33F5DFDD, 0x7119081D, 0xF88BC7FD, 0x3DCD111D, 0x30516FBD,
 	},
 	"NBG0 bitmap 8bpp": {
-		0x6302E13A, 0x80D49811, 0x8545C60F, 0xBFF6560F, 0x1F6441E7, 0xCF782528, 0x4CCEA847,
-		0xEFE64718, 0xC82E5460, 0x7730A659, 0x6C54041A, 0xBBE4AF51, 0x5A41EE81, 0x504F7553,
-		0x5EB1ADCE, 0xB7D6032C, 0x0B589932, 0xC0CC2D93, 0xDA378CB7, 0x33B8BBDB, 0x2464E2D4,
-		0x98B3675D, 0x28148056, 0x2558802F, 0xBAC28DBD, 0x2991C556, 0xF11F2B14, 0xA90500CF,
+		0x24806AED, 0x61F460F5, 0x0B13698D, 0x7044EB7D, 0x09C0195D, 0xC6200C45, 0x90293705,
+		0x98C897C5, 0x999394F5, 0x4C9FD4CD, 0x9FD8DA05, 0x9EF9B5C5, 0xFBBEE905, 0x5E5CA60D,
+		0x7A6AF3F5, 0xDE85A4AD, 0xF2D52675, 0x3E8FF17D, 0x3018E72D, 0x154BD435, 0x9FF47C8D,
+		0x31B34E55, 0x93D7CF35, 0xDC66177D, 0x0E856235, 0xD1D5787D, 0xE0A77C35, 0x8937E765,
 	},
 	"NBG0 bitmap 32K": {
-		0x90BDC8ED, 0xD00ED6B4, 0xDCB140D3, 0xBEF4C101, 0xA534AB94, 0xE8E138E3, 0x666E467A,
-		0x00C08CCC, 0xDBA1CC37, 0x07C82778, 0x69FEE724, 0xB20EF1C6, 0x733D1855, 0x641C5E3A,
-		0x94E47C44, 0x54B14A08, 0x13B6025F, 0xE6C4C3CD, 0x35956262, 0xD115579E, 0x3EA1ADA0,
-		0x64F26F90, 0x161109D7, 0x886A9E55, 0x90BDC8ED, 0xD00ED6B4, 0xDCB140D3, 0xBEF4C101,
+		0x66F63B45, 0xFB2E2ED5, 0x5CC8D465, 0xFCBC8675, 0x86E28345, 0xCBB2CE95, 0x767DC825,
+		0x849BAEF5, 0x81C40EC5, 0xCEE19535, 0x2836BFE5, 0x50EFC1F5, 0x3F461F85, 0x17DE1BB5,
+		0xFB4C5A25, 0x8E75A8F5, 0xF5E28545, 0x0EF1C3C5, 0x9D807905, 0x18004505, 0x827DF305,
+		0xD4A70F85, 0xB82921C5, 0x206B1445, 0x66F63B45, 0xFB2E2ED5, 0x5CC8D465, 0xFCBC8675,
 	},
 	"NBG0 line scroll vertical cell scroll": {
-		0xC2733ED1, 0x2FDECE13, 0xF7871EA6, 0x41A8E47C, 0xA484A362, 0x683BBF42, 0x67F69401,
-		0xB59C335D, 0x3AE93E20, 0xAD055AC1, 0xC75FA9B2, 0xDC5B8452, 0x2EBB1148, 0x58FB6489,
-		0xAAB70D0E, 0x86CE4833, 0x6D1BDF8F, 0x18F9E751, 0xFD5E07C5, 0x07769D52, 0xD32C32B1,
-		0x0CBE8B0C, 0xFFDD5B53, 0x70E5E282, 0xC85337CD, 0xA9679E11, 0x50A7F536, 0xA657E2E1,
+		0x1BA0C2BD, 0x99A8033D, 0x8425698D, 0xB2C241FD, 0x0001167D, 0x5375D7B5, 0xF949C505,
+		0xB99B0A5D, 0xF4A108DD, 0x5639646D, 0xB3619E8D, 0x5B6DB4FD, 0xE588E6ED, 0xDA3F5305,
+		0x3DA5CBC5, 0x1BDB49B5, 0xD0917C75, 0x1D47C2C5, 0x602E68C5, 0x972CB79D, 0xA932CB95,
+		0x0845327D, 0x29F5ED65, 0x041A2455, 0x3C1D8CF5, 0x73725F5D, 0xEE5D63C5, 0xF21F9655,
 	},
 	"NBG0 mosaic": {
-		0x8D6EF475, 0x8A7C1885, 0x64B23FB5, 0x2FCE1A85, 0xCC5F4FB5, 0x9D9A3505, 0xA1ED7575,
-		0x586B1E05, 0x8D6EF475, 0x8A7C1885, 0x64B23FB5, 0x2FCE1A85, 0xCC5F4FB5, 0x9D9A3505,
-		0xA1ED7575, 0x586B1E05, 0x8D6EF475, 0x8A7C1885, 0x64B23FB5, 0x2FCE1A85, 0xCC5F4FB5,
-		0x9D9A3505, 0xA1ED7575, 0x586B1E05, 0x8D6EF475, 0x8A7C1885, 0x64B23FB5, 0x2FCE1A85,
+		0x437C17C5, 0x46978745, 0x24709BC5, 0xE8768545, 0xDC6717C5, 0x10580D45, 0xE60BEBC5,
+		0x08B77D45, 0x437C17C5, 0x46978745, 0x24709BC5, 0xE8768545, 0xDC6717C5, 0x10580D45,
+		0xE60BEBC5, 0x08B77D45, 0x437C17C5, 0x46978745, 0x24709BC5, 0xE8768545, 0xDC6717C5,
+		0x10580D45, 0xE60BEBC5, 0x08B77D45, 0x437C17C5, 0x46978745, 0x24709BC5, 0xE8768545,
 	},
 	"four NBG layers": {
-		0x46ABC34B, 0x603A9004, 0x8E94818D, 0x70175DE2, 0xA96255B9, 0x2F3A7C34, 0x85A851C6,
-		0x732BE5B4, 0x1856D044, 0x19EE1526, 0xD3BE6EFB, 0xD68AB1DA, 0xA0A731AA, 0xE1A36C05,
-		0x1190E462, 0xA112AD96, 0x88C7F6F9, 0x04280FC5, 0xA2596D58, 0x355899DF, 0x219734AD,
-		0x14949962, 0xF03796E6, 0x14233791, 0x66CA088B, 0x603A9004, 0x8E94818D, 0x70175DE2,
+		0x0F75651D, 0xA4385495, 0x66EF6DE5, 0xAD2575E5, 0x79F6FB25, 0x1A49B6B5, 0xDAFC468D,
+		0xFBA808AD, 0x4D3D2F6D, 0xE136E805, 0xC57B4C9D, 0x883F451D, 0x5F06BE8D, 0x289F3E8D,
+		0x1B802515, 0xE54E468D, 0x72CC9055, 0xCAB361BD, 0x82565EF5, 0xAA52BF75, 0x8467A7E5,
+		0xBCD98015, 0x8CF44FB5, 0x8383DD2D, 0xFAB21035, 0xA4385495, 0x66EF6DE5, 0xAD2575E5,
 	},
 	"RBG0 cell": {
-		0x813B50E3, 0x81EA3B78, 0x9563BADA, 0x74A60B5E, 0xE666B17B, 0xEADF08AF, 0x0E245C15,
-		0x92C5367C, 0x2505A644, 0xA8353695, 0xDA765DD1, 0x99583B17, 0x7DF02073, 0x862CFBA3,
-		0x7B560129, 0x21154FA0, 0x972F34BA, 0xBD385E38, 0x76CB1D8C, 0x73583602, 0x1FA5FE7A,
-		0x04AA0705, 0x4A69228C, 0xC175FCA3, 0xBDD3041B, 0x3DA80F0B, 0x1F1F508C, 0x38AD128B,
+		0x96203BD5, 0x06F5584D, 0x8C61AF6D, 0x9B7DDC35, 0xF470F2BD, 0xD7291645, 0x07E88235,
+		0x295DF24D, 0x3212131D, 0x87C5F785, 0x3CAA7B15, 0x6AF85D2D, 0x31005B3D, 0xD7440EE5,
+		0x31F76395, 0x987D816D, 0x16EA5FD5, 0x6903460D, 0xD9F67C35, 0x4FA58AA5, 0x4B2A922D,
+		0xFFAAEF05, 0x17B1C21D, 0x2876024D, 0xF526ABA5, 0xA4058B2D, 0xCDFC82B5, 0x87A0D675,
 	},
 	"RBG0 cell coefficients": {
-		0x4173E820, 0xDBF72064, 0xE1AA24A0, 0x9531C515, 0x6C870AF6, 0x3A1FA46E, 0x44F24354,
-		0xAAFD41C9, 0x9001844B, 0x3239A8DB, 0x9BDA8385, 0x55A17F3B, 0x6B0B7596, 0x24C42EE5,
-		0xEF02EA25, 0x62F69252, 0xE72C83BE, 0x595D56FE, 0x90AF8960, 0x2DD012FC, 0xCF8D5D94,
-		0xB9C9376C, 0x1363F1EC, 0xB44239AB, 0x94BAC6EC, 0x6D5CB66C, 0x08FA852B, 0x92F0807C,
+		0x324FB3A5, 0x3E0C4165, 0x0F9DB055, 0xBDFD4055, 0x5F3A771D, 0x606FF8A5, 0x9B8C340D,
+		0x6C935335, 0x2402736D, 0xA08E07F5, 0x084B433D, 0x737F40BD, 0x81F62885, 0xECBFF4BD,
+		0xE674507D, 0xC96386E5, 0x4791B02D, 0x214BC5B5, 0xBF6FC74D, 0x471E4615, 0xB30A95ED,
+		0x8043650D, 0x97DAD0FD, 0x2720DE65, 0x8C1743F5, 0x18BD7CDD, 0x91C8BDD5, 0x09A6C2C5,
 	},
 	"RBG0 bitmap 8bpp": {
-		0xB087285D, 0x1472FC27, 0xFA78DE1C, 0xC7BC767C, 0x45F95521, 0xDE18312F, 0xAF458149,
-		0xF9091FCF, 0x44728D18, 0x3078F0AB, 0x8BE129B5, 0x4BB6CE2E, 0xF18AB2A2, 0x9B16C763,
-		0xF2DE587A, 0x5D72A1ED, 0xDC98CF1F, 0x5B4D863D, 0xA6167F63, 0xE6186F38, 0x4645B9E3,
-		0x71A17820, 0x74B565FE, 0x2EDEE3AE, 0x24BCA90E, 0xA48BF158, 0x4F9102D7, 0xC4759F18,
+		0xAC12777D, 0x68F31065, 0x97E13F8D, 0x04BC167D, 0x5E21F965, 0x94FDA4BD, 0x1CC260D5,
+		0x414BEB15, 0x383307CD, 0x5F0E98FD, 0xF2AE636D, 0xB6DFBC5D, 0x15541ADD, 0x2DDB8395,
+		0x525530C5, 0x167E63C5, 0xF509554D, 0x4799D845, 0x761BCDA5, 0x82D3342D, 0xA478C265,
+		0x9475E15D, 0xFB81078D, 0x24C09125, 0xD1BBA49D, 0x7FCD8315, 0xDF1FCA35, 0x2037C79D,
 	},
 	"RBG1 over RBG0": {
-		0xF74051AF, 0x78470BEC, 0x7D563A89, 0x85185FB4, 0x3D150CC7, 0xBF2FF11F, 0x0334E8D5,
-		0x543CE898, 0xD7719241, 0x2D4107EC, 0x1F69928D, 0xD116CBF0, 0xB0446457, 0x735684F8,
-		0x7F6F70E4, 0x70BB2BFA, 0x6D565865, 0x173BFC25, 0x476CFF26, 0xA4B54EEB, 0xA8425F1F,
-		0xB10E4F55, 0x0FB6C283, 0x79B59EBF, 0x7B396A8F, 0x84102C3D, 0x1D57AE34, 0xF3ED68F1,
+		0x68C6EDAD, 0x9FC6B4FD, 0xC8C0E0A5, 0xD1DFF38D, 0xFEFDB05D, 0xC16095CD, 0x9BB352C5,
+		0x1098EDFD, 0xEF1FCDC5, 0x4FC5F37D, 0x159021DD, 0x72C05925, 0x91726B6D, 0x9FC8E3CD,
+		0x1CA3629D, 0x096B550D, 0x8D0C87F5, 0xC1BE868D, 0xF09F90D5, 0x721FD99D, 0xA473AD5D,
+		0xA1022525, 0x3B364FD5, 0x16A5F295, 0x536B17DD, 0xD2252B05, 0xF6000AB5, 0xDB75D265,
 	},
 	"sprite 16-bit": {
-		0xA9537D7A, 0x63CCE513, 0x86491D3D, 0x9E6162AB, 0x8D6F6B79, 0x56DACE9A, 0x6AE3FED6,
-		0x89C8EE7F, 0xCD8C9611, 0x40188A44, 0xE0D2AD51, 0x4863A116, 0x6C54DE1F, 0x452034B7,
-		0x4EF717ED, 0xAA27E781, 0x5726A64B, 0x456C1FB8, 0x495F9B7C, 0x0F788EE1, 0x4C84A85D,
-		0x2CDA384A, 0xF3D09C6E, 0xADEB4042, 0x94D41E2B, 0xBC84CD14, 0x6B2A8D4C, 0xF04FAAB5,
+		0xE449767D, 0x34BA9145, 0xB14DAAFD, 0x2F1A4E45, 0xFC2DAA95, 0xE2D50BED, 0xFEA1FCFD,
+		0x522E5DF5, 0x84FB0565, 0xAD4BA9C5, 0xA27FFFBD, 0xED30C295, 0xF4D878A5, 0xD70308AD,
+		0x755B9EDD, 0x806314A5, 0x84C8A915, 0xC767D125, 0x3E095D25, 0x4BF0811D, 0xFB224C4D,
+		0x006364D5, 0x28085FC5, 0x37177F3D, 0x59284B0D, 0x28FFF295, 0x1283A3F5, 0xB79ABB25,
 	},
 	"sprite 8-bit": {
-		0x205ACBE2, 0x3981BFC6, 0x7E909079, 0x4EF0D4CB, 0x456F9DFB, 0xB42B0718, 0x03870976,
-		0xDB47ADF5, 0x029C8C9A, 0x72711C0C, 0x11D65BC5, 0xC5B52C27, 0x07D6C3B0, 0x5DB8D238,
-		0xA1AC90AA, 0xBD5F5A65, 0xED150760, 0xF6DFC4A7, 0x9C14BF44, 0x9EE45F65, 0xB7313C26,
-		0x2208E41E, 0xBDE9154C, 0x4C1222DE, 0x581FE506, 0xE72454AA, 0x568AA9C4, 0xF53A70AD,
+		0xE085C7C5, 0x8611C49D, 0x2319EF85, 0x550189DD, 0x28EDA35D, 0x968F2845, 0xF1CB29CD,
+		0x10B1BF15, 0xC964BC4D, 0x8F76C755, 0x78536C4D, 0x4E1070ED, 0xB26A0DB5, 0xD6E6A46D,
+		0xA213E445, 0xDE004B9D, 0xDDF66E35, 0xDA7404A5, 0x629F7775, 0xD39CAFD5, 0x9B13C015,
+		0xD7BCD84D, 0x6E9D91FD, 0x1ED3D815, 0x9145AB4D, 0xA337300D, 0xF6940B6D, 0x7A48C9A5,
 	},
 	"six layers": {
-		0x0F2ADF46, 0x8EA1B0F4, 0xF62473C5, 0xA6A16AC4, 0xCC0B53C8, 0xFF8888BA, 0x6B43A754,
-		0x7B7E5579, 0x80700E6D, 0x4DF2793B, 0x4D97F7AE, 0x84BBC617, 0xDD6F635D, 0xF40E8300,
-		0xF3F8A902, 0x5EBD715E, 0xF82747B4, 0x20D5F3CF, 0x3EA630FB, 0x26D0AD36, 0xA9DFF88B,
-		0xCC73FBF7, 0xC95A4A0C, 0x07FE4055, 0x12ED581E, 0x5265EAED, 0x35FF47C5, 0xE7BADD05,
+		0xF838EAF5, 0x85D2BB2D, 0x4EF8876D, 0xF7A98AFD, 0xCB53DB85, 0xFFDB7A75, 0xE29551F5,
+		0x23A99305, 0x7332733D, 0xD24E3F95, 0x3248A035, 0x33B14D25, 0x85FC8145, 0x5FCD0395,
+		0x3B6B0CA5, 0xFF483235, 0x8E843C85, 0x3F42149D, 0x2D34B90D, 0x32EE040D, 0x75EB7A8D,
+		0x95E0E385, 0x2178EB5D, 0xA70A065D, 0x15F6F32D, 0xD1D63D4D, 0x3FBD27ED, 0x2F995E5D,
 	},
 	"six layers W0": {
-		0xD6DAEE20, 0x4DF7371E, 0x657BEA70, 0xBBD5675B, 0x1023A1C5, 0xE5D8E261, 0x3DB1547A,
-		0x7C50767E, 0xF243F51A, 0x761601E6, 0x247C1124, 0x5C18FB8C, 0x8212B921, 0xC0418518,
-		0x1AF6CFAA, 0x05579174, 0x16055CBE, 0xFE382B02, 0x49106363, 0x617CED91, 0x71FDA8DD,
-		0x269EB4A8, 0x7496999C, 0x8CDA26A6, 0x01BED00E, 0x2F8DC875, 0xBD6B4FB1, 0xB698936F,
+		0x90E0F90D, 0x366C4355, 0xD9A5AC95, 0x19E1593D, 0xC1A57405, 0x8B0648B5, 0x0EEBE985,
+		0xB8AB01AD, 0xA85907BD, 0x83FF4C35, 0x551585AD, 0xB5C783FD, 0x0ED10DB5, 0x4DF821DD,
+		0x26808E65, 0x7F655D6D, 0xFC797CED, 0xEDD2DB0D, 0xA3410E65, 0x60539D4D, 0x9DDA7C75,
+		0xF4AB6E95, 0xAB31A825, 0x1D4FA18D, 0x635640E5, 0xB2A4129D, 0xA4F5C3A5, 0xBEA276F5,
 	},
 	"six layers W0 W1 sprite window": {
-		0x8DEB0618, 0x8401C735, 0x04781A23, 0x0FF10090, 0xFB8B5099, 0x3D189B5A, 0x280DC72D,
-		0x2C64662B, 0x0EA13FBE, 0xAB494387, 0xB706617B, 0x22D0370D, 0x5288EFB4, 0x1C92AFB9,
-		0xEC728641, 0x8759E05E, 0x323AE059, 0x35A66901, 0x4A726D83, 0xABFFF257, 0xEB48C76D,
-		0x3168DE16, 0xB69A0DF1, 0x2DA78950, 0x6E35FB09, 0x3ACECE26, 0xB1D96E58, 0xF9DF2D9A,
+		0x70459CC5, 0xE466CCE5, 0x6B2ED485, 0x5E8B305D, 0xDAA93C55, 0xA0FF1515, 0x6DDA28FD,
+		0x4026CDFD, 0xCC66174D, 0x131D247D, 0x48008E5D, 0x28B4EE3D, 0x1A43289D, 0x537930DD,
+		0x41EE1EDD, 0x3A405045, 0x2DF817D5, 0x2B3040F5, 0x4CBABA15, 0xD682523D, 0x77397C45,
+		0x2BB696E5, 0x0777387D, 0x06EA374D, 0x2699F425, 0x3DA3CCFD, 0x33C9C2CD, 0xBEDC2EA5,
 	},
 	"six layers line windows": {
-		0x8DEB0618, 0x8401C735, 0x3F0D2FD2, 0xEF43058E, 0xC5E68486, 0xEA0D2AFC, 0x611E08FE,
-		0xEFE6FF9A, 0x50BCA8BD, 0x450C4578, 0x010D201A, 0x3C9B0670, 0x168999B3, 0xA6C26879,
-		0xDE51A741, 0xBE9C473D, 0x743B2F60, 0x17639FA2, 0xC9459F78, 0x43BCE40A, 0x1BE3223B,
-		0x1E647244, 0x3C19330C, 0x41A205E9, 0x3DA8FFBE, 0xCFED7DF6, 0xB1D96E58, 0xF9DF2D9A,
+		0x70459CC5, 0xE466CCE5, 0x9E035385, 0xDF97B51D, 0x948CDCBD, 0x9C3012BD, 0xB64F9F6D,
+		0xCD0D1C75, 0x9419CC05, 0x43B7BC35, 0x029A7345, 0x48295875, 0xE5BAE7AD, 0x47CABE95,
+		0x0A6C024D, 0x123CAC7D, 0x6E02696D, 0xDF29D0DD, 0xD40ECA8D, 0xA9528295, 0xD64AB1BD,
+		0x609D6F1D, 0x0D5E52A5, 0x954BB2BD, 0xE5122E85, 0xC3A64435, 0x33C9C2CD, 0xBEDC2EA5,
 	},
 	"six layers composite features": {
-		0x573BEDCA, 0x0815FA1A, 0xF13DDA3B, 0x2C9E79D3, 0x712C6834, 0x684AF063, 0x913FF2E9,
-		0xE50DE42D, 0x2FAAD3D4, 0xF1DD050D, 0x18B72489, 0x7C670F3F, 0xE1447549, 0x4CED88FE,
-		0x59A87261, 0x4085AF36, 0x5CB79A67, 0x18DD6B16, 0x0D48C214, 0x92D4E5E9, 0x2B8244D9,
-		0xA2DA2905, 0x91C8B33A, 0x0212D5F8, 0x10123884, 0x2FDCB660, 0x00DF0B29, 0xE97D63E6,
-	},
-	"six layers 4 spans": {
-		0x8DEB0618, 0x8401C735, 0x04781A23, 0x0FF10090, 0xFB8B5099, 0x3D189B5A, 0x280DC72D,
-		0x2C64662B, 0x0EA13FBE, 0xAB494387, 0xB706617B, 0x22D0370D, 0x5288EFB4, 0x1C92AFB9,
-		0xEC728641, 0x8759E05E, 0x323AE059, 0x35A66901, 0x4A726D83, 0xABFFF257, 0xEB48C76D,
-		0x3168DE16, 0xB69A0DF1, 0x2DA78950, 0x6E35FB09, 0x3ACECE26, 0xB1D96E58, 0xF9DF2D9A,
+		0x0AC4B645, 0x05FEFB37, 0x9D0A32D9, 0xBB248BC2, 0xE7F336AA, 0xFBD1338F, 0xB3D5E7DA,
+		0xF38604B8, 0xFE01A8C2, 0x476B26E9, 0x87E5F3E0, 0x6447197F, 0xEC09A614, 0x895A4A8F,
+		0xA901FAC5, 0xB94B42B3, 0x2CF51028, 0xDBC4F362, 0x7C143FFF, 0x37044082, 0x8A92362D,
+		0x3168C803, 0xAC8F8EE9, 0x4A52CF4B, 0x5915CF16, 0xFB105A27, 0xD084D7CC, 0xFF4BA120,
 	},
 	"six layers hi-res 640": {
-		0xCDBF4F84, 0x219A3118, 0xA6FD5E45, 0x00D28276, 0xF0C4457F, 0x8EA9D7F4, 0x15B818FB,
-		0x4F516279, 0x7A917C2E, 0xFD22293E, 0x356E1773, 0x3A57F05C, 0x7013A516, 0x0ED950B7,
-		0x52B9BEE6, 0x915C7EA2, 0x7B93439E, 0x9E79EAD2, 0x7640C3F4, 0x1B314CE8, 0x97179612,
-		0x3F12F236, 0x8D6CDB2D, 0x2D753FC0, 0x21E42FDB, 0x969EB2B5, 0x887574A0, 0x8DE8C599,
+		0x40C39365, 0x04F4F3ED, 0xAE5314FD, 0x43634315, 0x6A900D65, 0xF6F70D25, 0x89034CCD,
+		0x8C40AA95, 0x994CCF4D, 0x32B2FDED, 0x3E96CAA5, 0x305F4C75, 0x3591143D, 0x0C61E3AD,
+		0x12F6360D, 0x1CB344F5, 0xE98F07E5, 0x81069C35, 0xE2987FA5, 0x5391BF25, 0xB079440D,
+		0xB5B72985, 0x8700D9DD, 0x9D6817FD, 0x292F32DD, 0x5114B0D5, 0x189B3CC5, 0x89A9F6D5,
 	},
 	"six layers LSMD3": {
-		0x595D0A8A, 0xF601E38F, 0xCA5BB673, 0x0D209B33, 0x8BDE6D1F, 0x7F6E34AA, 0xC0B12A40,
-		0x4B58F73C, 0xAAC237DA, 0x530AC897, 0x65E9E617, 0xB29015B4, 0xAD11E78D, 0x5C2F1D8A,
-		0x4105A067, 0x4C613D34, 0x358E82DF, 0x6B3AC6D5, 0x4BFCFC8E, 0xC19FAA89, 0x7BB3AE00,
-		0x6968738A, 0x5CF5F3A4, 0x8F558955, 0x27AD9CCB, 0xC174D0F6, 0x9DF63816, 0xC966E0E7,
-		0xAD4DB711, 0xF055BEAF, 0xDE982AE1, 0xB7A0C342, 0xBF2A0473, 0x2EF1F936, 0x93FC4E56,
-		0xA649A3CD, 0x9FE19836, 0xA88E8182, 0x85B588C4, 0x8236E24F, 0x37ADE329, 0x905C322E,
-		0x05368F95, 0x341BF28E, 0x13EA5CFD, 0xCC21230B, 0x06A0A72F, 0x7B3504D3, 0xFDD14429,
-		0x90A4404D, 0xCAA9D2B6, 0x84F82830, 0x38C9FA57, 0x32D5A584, 0x911E9504, 0xBEE014DB,
+		0xBBF6840D, 0xCE685F75, 0x6C3DFF75, 0x8551EECD, 0x8E8A13ED, 0x92CDDE55, 0x5801B965,
+		0x944992D5, 0xFB37A385, 0x2D695AB5, 0x774F5835, 0x74C8ABFD, 0x83453B0D, 0xDF2EFE1D,
+		0x765D571D, 0x4F0709F5, 0x3E5F4005, 0xCEAD2B2D, 0x01644175, 0x098A6B1D, 0xE21CE5AD,
+		0xEA6004C5, 0x65F534FD, 0xF6987B2D, 0x391BEB0D, 0x8871A32D, 0x81E48E6D, 0x64EDBDA5,
+		0x532AE26D, 0xCC34618D, 0x931597AD, 0x7F4D20DD, 0x94E2C3B5, 0x87345E9D, 0x2A98DB55,
+		0x1BB21D4D, 0xB68D5F65, 0xFD3F1985, 0xD995D2B5, 0xD544B405, 0x66150C5D, 0xFCADD695,
+		0x51C0EA2D, 0x13CB0535, 0x3E52DDD5, 0x841CCF95, 0xAE87E7A5, 0x6F0AE8AD, 0x9A36417D,
+		0xB410E4BD, 0x916591D5, 0xD100B375, 0x128370FD, 0x5603758D, 0xB5B432BD, 0x0A88B035,
 	},
 	"six layers 352": {
-		0xA0CE30C6, 0xF6F665F2, 0x3642C2AE, 0x06C37DFA, 0x5F7A3A19, 0x69A539C9, 0xDA0EB735,
-		0x6A373638, 0x90322EFD, 0x677AFF2D, 0xC758A1DC, 0x3F492FF4, 0x34E8C1EA, 0xD9DD2750,
-		0x41E11D1A, 0x2A926F20, 0x135703EC, 0x37893AEC, 0x88741692, 0x9A10EED4, 0x10B3565A,
-		0x3BF65204, 0x4206C948, 0x784D693F, 0x005C97F4, 0x233A5789, 0x8F30EC32, 0x88E2C8F6,
+		0x6E7DC0CD, 0xEEC9E0ED, 0x84D9EB75, 0x6BBE260D, 0x040313C5, 0xE3E22D45, 0x4C0AF8C5,
+		0x60EF21ED, 0xD12C32C5, 0xB0EA61BD, 0x512F3AB5, 0x786A212D, 0x170EA20D, 0x4BAE8C05,
+		0xF27BBCFD, 0xADB10D7D, 0x84B1C5A5, 0xCDBE8075, 0x322F1475, 0x418E794D, 0xE4943A1D,
+		0xD933A01D, 0x4A6C855D, 0xAC8B6F2D, 0xD69954AD, 0xE57C599D, 0xE9D11975, 0xF966F94D,
 	},
 	"six layers PAL 256": {
-		0x8DEB0618, 0x8401C735, 0x04781A23, 0x0FF10090, 0xFB8B5099, 0x3D189B5A, 0x280DC72D,
-		0x2C64662B, 0x0EA13FBE, 0xAB494387, 0xB706617B, 0x22D0370D, 0x5288EFB4, 0x1C92AFB9,
-		0xEC728641, 0x8759E05E, 0x323AE059, 0x35A66901, 0x4A726D83, 0xABFFF257, 0xEB48C76D,
-		0x3168DE16, 0xB69A0DF1, 0x2DA78950, 0x6E35FB09, 0x3ACECE26, 0xB1D96E58, 0xF9DF2D9A,
-		0xEBC8B757, 0xC852AE07, 0x15843747, 0xFBE5B790,
+		0x70459CC5, 0xE466CCE5, 0x6B2ED485, 0x5E8B305D, 0xDAA93C55, 0xA0FF1515, 0x6DDA28FD,
+		0x4026CDFD, 0xCC66174D, 0x131D247D, 0x48008E5D, 0x28B4EE3D, 0x1A43289D, 0x537930DD,
+		0x41EE1EDD, 0x3A405045, 0x2DF817D5, 0x2B3040F5, 0x4CBABA15, 0xD682523D, 0x77397C45,
+		0x2BB696E5, 0x0777387D, 0x06EA374D, 0x2699F425, 0x3DA3CCFD, 0x33C9C2CD, 0xBEDC2EA5,
+		0x3B49A7D5, 0xF6B5DB3D, 0xD437D30D, 0x9B941E45,
 	},
 }

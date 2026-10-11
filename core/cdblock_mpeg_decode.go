@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 
 	"github.com/gen2brain/mpeg"
+
+	"github.com/user-none/erings/core/compute/screen"
 )
 
 // MPEG playback engine. Sectors routed into the connected buffer
@@ -479,7 +481,8 @@ func (p *mpegPlayback) spent() bool {
 // frame (mailbox bits 1:0 = slot index).
 const mpegMailboxFresh = 1 << 2
 
-// mpegFrameSlot is one triple-buffer slot: packed 0x00RRGGBB pixels.
+// mpegFrameSlot is one triple-buffer slot: pixels as decoded colors
+// (screen.PackColor).
 type mpegFrameSlot struct {
 	rgb  []uint32
 	w, h int
@@ -600,7 +603,7 @@ func (cb *CDBlock) mpegLatchFrame(f *mpeg.Frame) {
 		dst := s.rgb[y*w : y*w+w]
 		for x := 0; x < w; x++ {
 			r, g, b := color.YCbCrToRGB(yRow[x], f.Cb.Data[cRow+x/2], f.Cr.Data[cRow+x/2])
-			dst[x] = uint32(r)<<16 | uint32(g)<<8 | uint32(b)
+			dst[x] = screen.PackColor(uint32(r), uint32(g), uint32(b))
 		}
 	}
 	// Publish: the converted slot goes into the mailbox, whatever was

@@ -33,3 +33,41 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  test-windows:
+    name: Test (Windows, DX12)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install make
+        run: choco install make
+
+      - name: Install DirectX Shader Compiler
+        shell: bash
+        run: |
+          ver=v1.9.2607
+          sha256=a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241
+          curl -fL -o dxc.zip "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$ver/dxc_2026_07_29.zip"
+          echo "$sha256  dxc.zip" | sha256sum -c -
+          powershell -Command "Expand-Archive -Path dxc.zip -DestinationPath C:\\dxc -Force"
+          echo "C:\\dxc\\bin\\x64" >> "$GITHUB_PATH"
+
+      - name: Compile shaders
+        shell: bash
+        run: make dxil
+
+      - name: Vet
+        shell: bash
+        run: go vet ./internal/hostgpu/... ./core/...
+
+      - name: Test
+        shell: bash
+        run: go test ./internal/hostgpu/... ./core/...

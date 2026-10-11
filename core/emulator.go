@@ -25,6 +25,19 @@ type Emulator struct {
 	scsp    *SCSP
 	cdblock *CDBlock
 
+	// The renderer (renderer.go): the software renderer by default,
+	// the GPU renderer after SetRenderer; rendererErr keeps a
+	// runtime failure that forced software mode.
+	renderer     frameRenderer
+	rendererMode Renderer
+	rendererErr  error
+
+	// renderShift is log2 of the scale N the frame renders at
+	// (SetUpscale): 0 renders at the native resolution with the
+	// accurate renderers, and 1 to 4 render at 2x, 4x, 8x, or 16x on
+	// both axes with the enhanced renderers.
+	renderShift uint32
+
 	// Per-frame timing derived from VDP2
 	systemCyclesPerScanline uint32
 	scanlines               uint16
@@ -83,21 +96,24 @@ type Emulator struct {
 	secondaryCycles atomic.Int64
 	vdpLinesWalked  atomic.Int64
 
-	// Per-frame walk parameters for the workers, written before the
-	// kick channel sends so both workers see the values the main
-	// goroutine's frame loop uses even if a mid-frame SMPC reset rewrites
-	// the live timing fields.
-	frameLineWidth     uint32
-	frameScanlines     uint16
-	vdpWalkActiveLines uint16
-	vdpWalkActiveCyc   uint32
-	vdpWalkWidth       uint16
+	// Per-frame walk parameters: the frame's copies of the live timing
+	// fields (systemCyclesPerScanline, scanlines) and the VDP2 display
+	// geometry, written before the kick channel sends so both workers
+	// walk the same frame the main goroutine's frame loop does. The
+	// live fields can change inside a frame: the clock-change reset
+	// (CKCHG) recalculates them on the master goroutine, and a worker
+	// reading them after the kick could otherwise see the new values
+	// while the main loop walks the old. The copies hold the frame to
+	// one set; the change takes effect at the next frame boundary.
+	frameCyclesPerScanline uint32
+	frameScanlines         uint16
+	vdpWalkActiveLines     uint16
 
-	// The VDP worker cycle-walks the frame: VDP1 incremental command
-	// ticking per chunk, with VDP2 BeginFrame/RenderLine and the VDP1
-	// frame events fired at their cycle positions. RunFrame sends on
-	// vdpJobChBegin to start the walk and receives on vdpJobChFinished
-	// at frame end.
+	// The VDP worker walks the frame a line at a time: VDP1 incremental
+	// command processing by the line's cycles, the VDP2 row render at
+	// the line's end, and the VDP1 frame events at their lines.
+	// RunFrame sends on vdpJobChBegin to start the walk and receives on
+	// vdpJobChFinished at frame end.
 	vdpJobChBegin    chan struct{}
 	vdpJobChFinished chan struct{}
 
@@ -169,6 +185,7 @@ func NewEmulator() *Emulator {
 	scu.SetBus(bus)
 	scsp.SetCDAudioSource(cdblock)
 	vdp2.SetEXBGSource(cdblock)
+	vdp2.SetRegCapture(true)
 
 	master := sh2.New(bus, true)
 	slave := sh2.New(bus, false)
@@ -184,6 +201,7 @@ func NewEmulator() *Emulator {
 		scsp:    scsp,
 		cdblock: cdblock,
 	}
+	e.useSoftwareRenderer()
 
 	// Wire boundary-crossing callbacks. SCU drives master IRL. SMPC
 	// requests the master NMI, defers its system reset to the frame
@@ -295,21 +313,22 @@ func (e *Emulator) GetSRAM() []byte { return e.bus.GetBackupRAM() }
 func (e *Emulator) SetSRAM(data []byte) { e.bus.SetBackupRAM(data) }
 
 // GetFramebuffer returns raw RGBA pixel data for the most recently
-// completed frame. RunFrame waits for the VDP worker's frame walk
-// before returning, so the buffer is complete and the worker parked
-// while the host reads it.
+// completed frame, at the active renderer's scale. RunFrame waits for
+// the VDP worker's frame walk before returning, so the buffer is
+// complete and the worker parked while the host reads it.
 func (e *Emulator) GetFramebuffer() []byte {
-	return e.vdp2.Framebuffer()
+	return e.renderer.framebuffer()
 }
 
 // GetFramebufferStride returns the stride (bytes per row) of the framebuffer.
 func (e *Emulator) GetFramebufferStride() int {
-	return e.vdp2.FramebufferStride()
+	return e.renderer.framebufferStride()
 }
 
-// GetActiveHeight returns the current active display height.
+// GetActiveHeight returns the current active display height, the
+// framebuffer's rows.
 func (e *Emulator) GetActiveHeight() int {
-	return e.vdp2.DisplayHeight()
+	return e.renderer.displayHeight()
 }
 
 // PixelAspectRatio returns the pixel aspect ratio for the current video
@@ -322,8 +341,8 @@ func (e *Emulator) GetActiveHeight() int {
 // (W/H) * PAR == 4/3. Computed on demand so it always matches the
 // currently reported framebuffer dimensions.
 func (e *Emulator) PixelAspectRatio() float64 {
-	w := e.vdp2.FramebufferStride() / 4
-	h := e.vdp2.DisplayHeight()
+	w := e.renderer.framebufferStride() / 4
+	h := e.renderer.displayHeight()
 	if w <= 0 || h <= 0 {
 		return 1.0
 	}
@@ -417,6 +436,9 @@ func (e *Emulator) SetOption(key string, value string) {
 	switch key {
 	case "fast_boot":
 		e.pendingFastBoot = (value == "true")
+	case "upscale":
+		// An unknown value leaves the active scale as it is.
+		e.SetUpscale(value)
 	}
 }
 
@@ -464,9 +486,11 @@ func (e *Emulator) Start() error {
 	return nil
 }
 
-// Close stops the frame workers spawned by Start. It must not run
-// concurrently with RunFrame, and RunFrame must not be called after
-// Close (its job-channel send would panic). Idempotent.
+// Close stops the frame workers spawned by Start and releases the
+// renderer, so a GPU renderer's device and buffers are released with
+// the session. It must not run concurrently with RunFrame, and
+// RunFrame must not be called after Close (its job-channel send would
+// panic). Idempotent.
 func (e *Emulator) Close() {
 	if e.closed {
 		return
@@ -474,4 +498,5 @@ func (e *Emulator) Close() {
 	e.closed = true
 	close(e.vdpJobChBegin)
 	close(e.secondaryJobCh)
+	e.renderer.close()
 }

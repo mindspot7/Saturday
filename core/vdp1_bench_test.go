@@ -3,24 +3,60 @@
 
 package core
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+	"time"
+
+	"github.com/user-none/erings/internal/hostgpu"
+)
 
 // VDP1 draw benchmarks. Every scene is a command list written to VRAM
 // through the bus-facing entry points and drawn through the frame
 // loop's sequence: VBlankIn (frame buffer change), VBlankOut, the
-// PTM=10 auto-trigger, and TickSystemCycles with a budget that covers
-// the whole list. Nothing here names a renderer-internal function, so
-// the numbers stay comparable across refactors of the draw path.
+// PTM=10 auto-trigger, and TickSystemCycles. Nothing here names a
+// renderer-internal function, so the numbers stay comparable across
+// refactors of the draw path.
+//
+// Two drivers draw the same lists. BenchmarkVDP1 draws a list in one
+// TickSystemCycles call with a budget that covers the whole list and
+// isolates the rasterizer inner loops. BenchmarkVDP1Walker draws it
+// in one TickSystemCycles call per VDP1 tick of the frame loop until
+// the command processor goes idle, the emulator's cadence, so the
+// per-call entry, the resume path, the yield checks, and the debt
+// carry are inside the number. The walker number is the gate; the
+// one-call number is the reference.
+//
+// Each scene runs under both renderers, as BenchmarkVDP2's do. The
+// software sub-benchmark is the walk drawing the list. The gpu
+// sub-benchmark is the same frame as the frame loop runs it in GPU
+// mode: the walk charges the list's cycles without drawing, the
+// renderer takes the entries after each tick and draws them on the
+// device, the display's end takes the rest and submits, and the
+// frame's end waits. It reports the takes and the submission on the
+// walker and the wait per frame beside ns/op. The frame has no VDP2
+// rows, so the VDP2's snapshot and rows, which BenchmarkVDP2
+// measures, stay out of the number. Without a device it skips.
 //
 // ns/op is the cost of drawing the scene's list once. The lists are
 // fixed, so the unit of work is fixed by the list geometry.
 //
-// TestBenchVDP1Scenes pins every scene's output. A benchmark number is
-// comparable with an earlier one only while that test passes: a scene
-// whose output changed measures different work.
+// TestBenchVDP1Scenes pins every scene's output under both drivers
+// against the same hashes. A benchmark number is comparable with an
+// earlier one only while that test passes: a scene whose output
+// changed measures different work.
 
 // benchVDP1Budget covers any list in one TickSystemCycles call.
 const benchVDP1Budget = 1 << 30
+
+// benchVDP1WalkerTick is the walker driver's tick, one scanline of
+// system cycles (the 320-dot NTSC line), the frame loop's cadence.
+const benchVDP1WalkerTick = 1708
+
+// benchVDP1WalkerMaxTicks bounds the walker driver's tick loop so a
+// list that never reaches its END command fails the test instead of
+// spinning.
+const benchVDP1WalkerMaxTicks = benchVDP1Budget / benchVDP1WalkerTick
 
 // VDP1 VRAM layout: the command list from 0, textures and tables from
 // 0x20000.
@@ -204,6 +240,11 @@ func benchVDP1Scenes() []benchVDP1Scene {
 		{name: "distorted sprite", build: grid(8, 5, 40, 44, func(x, y int16) benchCmd { return benchDistorted(x+4, y, 0) })},
 		{name: "distorted sprite strong HSS", build: grid(4, 3, 80, 72, benchDistortedStrong)},
 		{name: "distorted sprite half-transparent", build: grid(8, 5, 40, 44, func(x, y int16) benchCmd { return benchDistorted(x+4, y, 3) })},
+		{name: "distorted sprite converging half-transparent", build: grid(8, 5, 40, 44, func(x, y int16) benchCmd {
+			c := benchDistorted(x+4, y, 3)
+			c.xc, c.yc = c.xb, c.yb
+			return c
+		})},
 		{name: "polygon", build: polygons(0)},
 		{name: "polygon half-transparent", build: polygons(3)},
 		{name: "polygon mesh", build: polygons(0x0100)},
@@ -249,57 +290,260 @@ func benchVDP1Scenes() []benchVDP1Scene {
 	}
 }
 
-// benchVDP1Frame runs one frame's VDP1 sequence the way the frame loop
-// does: the V-blank IN frame buffer change and erase, V-blank OUT, the
-// PTM=10 auto-trigger on the change, and the draw.
-func benchVDP1Frame(v *VDP1) {
+// benchVDP1Change runs a frame's VDP1 sequence up to the draw the
+// way the frame loop does: the line record reset at the previous
+// frame's end, the V-blank IN frame buffer change and erase, V-blank
+// OUT, and the PTM=10 auto-trigger on the change.
+func benchVDP1Change(v *VDP1) {
+	v.restartList()
 	v.VBlankIn()
 	v.VBlankOut()
 	if v.PTM() == 2 && v.ConsumeFBSwap() {
 		v.StartAutoDraw()
 	}
+}
+
+// benchVDP1Frame runs one frame's VDP1 sequence: the change and the
+// draw in one call.
+func benchVDP1Frame(v *VDP1) {
+	benchVDP1Change(v)
 	v.TickSystemCycles(benchVDP1Budget)
+}
+
+// benchVDP1FrameWalker runs the same frame sequence at the frame
+// loop's cadence: one TickSystemCycles per scanline until the
+// command processor goes idle.
+func benchVDP1FrameWalker(tb testing.TB, v *VDP1) {
+	benchVDP1Change(v)
+	for i := 0; ; i++ {
+		v.TickSystemCycles(benchVDP1WalkerTick)
+		if !v.drawActive {
+			return
+		}
+		if i >= benchVDP1WalkerMaxTicks {
+			tb.Fatalf("command processor still active after %d ticks", i)
+		}
+	}
+}
+
+// benchVDP1GPU opens the GPU renderer for a scene's VDP1, the walk
+// charging cycles without drawing as the frame loop runs it in GPU
+// mode, on a VDP2 that renders no row: on the platform's backend,
+// skipping without a device, or on the compute sources prog built on
+// a test device. One frame change on the VDP2 gives the renderer its
+// geometry; the frames after run the VDP1's points alone.
+func benchVDP1GPU(tb testing.TB, v *VDP1, prog *hostgpu.Program) *gpuRenderer {
+	tb.Helper()
+	v2 := NewVDP2(NewSCU())
+	var g *gpuRenderer
+	var err error
+	if prog == nil {
+		if g, err = openGPURenderer(v2, v); err != nil {
+			tb.Skip(err)
+		}
+	} else if g, err = newGPURenderer(v2, v, prog, gpuBatchLines, 0); err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(g.close)
+	v.setPairKept(false)
+	v2.BeginFrame()
+	g.beginFrame()
+	return g
+}
+
+// TestBenchVDP1GPUDrivers holds the gpu sub-benchmarks' drivers to
+// the walk: two frames of each scene through each driver on the exec
+// device leave the device pair equal to the pair two frames of the
+// software driver leave.
+func TestBenchVDP1GPUDrivers(t *testing.T) {
+	parent, subs := ComputeSources()
+	prog, err := hostgpu.Build(&execDevice{}, parent, subs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drivers := []struct {
+		name  string
+		frame func(tb testing.TB, v *VDP1, g *gpuRenderer) (time.Duration, time.Duration)
+	}{
+		{"one call", func(_ testing.TB, v *VDP1, g *gpuRenderer) (time.Duration, time.Duration) {
+			return benchVDP1GPUFrame(v, g)
+		}},
+		{"walker", benchVDP1GPUFrameWalker},
+	}
+	for _, s := range benchVDP1Scenes() {
+		for _, d := range drivers {
+			t.Run(s.name+"/"+d.name, func(t *testing.T) {
+				want := s.build()
+				benchVDP1Frame(want)
+				benchVDP1Frame(want)
+				v := s.build()
+				g := benchVDP1GPU(t, v, prog)
+				d.frame(t, v, g)
+				d.frame(t, v, g)
+				if err := g.err(); err != nil {
+					t.Fatal(err)
+				}
+				for h := range g.vdp1FB {
+					got, ref := deviceBytes(t, g, g.vdp1FB[h]), want.physicalFB(uint32(h))
+					if !bytes.Equal(got, ref) {
+						t.Errorf("buffer %d differs from the walk at byte %d", h, firstDiff(got, ref))
+					}
+				}
+			})
+		}
+	}
+}
+
+// benchVDP1GPUEnd ends a frame on the GPU renderer as the frame loop
+// does: the take of the remaining entries and the submission at the
+// display's end, then the frame's wait. It returns the two times.
+func benchVDP1GPUEnd(g *gpuRenderer) (take, wait time.Duration) {
+	start := time.Now()
+	g.endDisplay()
+	take = time.Since(start)
+	start = time.Now()
+	g.endFrame()
+	wait = time.Since(start)
+	return take, wait
+}
+
+// benchVDP1GPUFrame runs one frame on the GPU renderer with the list
+// walked in one call, then one take of its entries.
+func benchVDP1GPUFrame(v *VDP1, g *gpuRenderer) (take, wait time.Duration) {
+	benchVDP1Change(v)
+	v.TickSystemCycles(benchVDP1Budget)
+	start := time.Now()
+	g.vdp1Line(0)
+	take = time.Since(start)
+	end, wait := benchVDP1GPUEnd(g)
+	return take + end, wait
+}
+
+// benchVDP1GPUFrameWalker runs one frame on the GPU renderer at the
+// frame loop's cadence: a tick per scanline, each followed by the
+// renderer's take, until the command processor goes idle.
+func benchVDP1GPUFrameWalker(tb testing.TB, v *VDP1, g *gpuRenderer) (take, wait time.Duration) {
+	benchVDP1Change(v)
+	for i := 0; ; i++ {
+		v.TickSystemCycles(benchVDP1WalkerTick)
+		start := time.Now()
+		g.vdp1Line(i)
+		take += time.Since(start)
+		if !v.drawActive {
+			break
+		}
+		if i >= benchVDP1WalkerMaxTicks {
+			tb.Fatalf("command processor still active after %d ticks", i)
+		}
+	}
+	end, wait := benchVDP1GPUEnd(g)
+	return take + end, wait
+}
+
+// benchVDP1GPURun times b.N frames of frame on the GPU renderer and
+// reports, beside ns/op, the takes and submissions on the walker and
+// the frame's wait, per frame.
+func benchVDP1GPURun(b *testing.B, g *gpuRenderer, frame func() (take, wait time.Duration)) {
+	b.Helper()
+	frame()
+	if err := g.err(); err != nil {
+		b.Fatal(err)
+	}
+	var take, wait time.Duration
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		t, w := frame()
+		take += t
+		wait += w
+	}
+	b.StopTimer()
+	if err := g.err(); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportMetric(float64(take.Microseconds())/float64(b.N), "take-us/op")
+	b.ReportMetric(float64(wait.Microseconds())/float64(b.N), "wait-us/op")
 }
 
 func BenchmarkVDP1(b *testing.B) {
 	for _, s := range benchVDP1Scenes() {
 		b.Run(s.name, func(b *testing.B) {
-			v := s.build()
-			benchVDP1Frame(v)
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			b.Run("software", func(b *testing.B) {
+				v := s.build()
 				benchVDP1Frame(v)
-			}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					benchVDP1Frame(v)
+				}
+			})
+			b.Run("gpu", func(b *testing.B) {
+				v := s.build()
+				g := benchVDP1GPU(b, v, nil)
+				benchVDP1GPURun(b, g, func() (time.Duration, time.Duration) { return benchVDP1GPUFrame(v, g) })
+			})
 		})
 	}
+}
+
+func BenchmarkVDP1Walker(b *testing.B) {
+	for _, s := range benchVDP1Scenes() {
+		b.Run(s.name, func(b *testing.B) {
+			b.Run("software", func(b *testing.B) {
+				v := s.build()
+				benchVDP1FrameWalker(b, v)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					benchVDP1FrameWalker(b, v)
+				}
+			})
+			b.Run("gpu", func(b *testing.B) {
+				v := s.build()
+				g := benchVDP1GPU(b, v, nil)
+				benchVDP1GPURun(b, g, func() (time.Duration, time.Duration) { return benchVDP1GPUFrameWalker(b, v, g) })
+			})
+		})
+	}
+}
+
+// benchVDP1Drivers is the two frame drivers the pin test runs every
+// scene under, against the same hashes.
+var benchVDP1Drivers = []struct {
+	name  string
+	frame func(tb testing.TB, v *VDP1)
+}{
+	{"one call", func(_ testing.TB, v *VDP1) { benchVDP1Frame(v) }},
+	{"walker", benchVDP1FrameWalker},
 }
 
 // TestBenchVDP1Scenes pins the draw frame buffer of every benchmark
 // scene after three frames (the third draws over the first frame's
 // content of the same buffer, the steady state the destination-reading
-// modes see in the benchmark loop) and checks that each scene draws
-// substantial content inside the system clip.
+// modes see in the benchmark loop) under both drivers and checks that
+// each scene draws substantial content inside the system clip.
 func TestBenchVDP1Scenes(t *testing.T) {
 	for _, s := range benchVDP1Scenes() {
-		t.Run(s.name, func(t *testing.T) {
-			v := s.build()
-			benchVDP1Frame(v)
-			benchVDP1Frame(v)
-			benchVDP1Frame(v)
-			drawn := 0
-			for y := 0; y < 224; y++ {
-				for x := 0; x < 320; x++ {
-					if readFBPixel(v, x, y) != 0 {
-						drawn++
+		for _, d := range benchVDP1Drivers {
+			t.Run(s.name+"/"+d.name, func(t *testing.T) {
+				v := s.build()
+				d.frame(t, v)
+				d.frame(t, v)
+				d.frame(t, v)
+				drawn := 0
+				for y := 0; y < 224; y++ {
+					for x := 0; x < 320; x++ {
+						if readFBPixel(v, x, y) != 0 {
+							drawn++
+						}
 					}
 				}
-			}
-			if drawn*10 < 320*224 {
-				t.Errorf("only %d of %d pixels drawn", drawn, 320*224)
-			}
-			checkBands(t, s.name, vdp1BandHashes(v), benchVDP1Pins[s.name], describeVDP1Band(v))
-		})
+				if drawn*10 < 320*224 {
+					t.Errorf("only %d of %d pixels drawn", drawn, 320*224)
+				}
+				checkBands(t, s.name, vdp1BandHashes(v), benchVDP1Pins[s.name], describeVDP1Band(v))
+			})
+		}
 	}
 }
 
@@ -341,52 +585,59 @@ var benchVDP1Pins = map[string][]uint32{
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"distorted sprite": {
-		0x9350575D, 0x7A42D905, 0xDEA4895D, 0x59F17262, 0x00EF2D50, 0x3EBD9B96, 0xE41F5BF8,
-		0x71B42508, 0xFC4F6D5C, 0x089B8C0A, 0xCCC0A54F, 0xBE48CD5B, 0x448A4D14, 0x0180999F,
-		0x59F17262, 0x00EF2D50, 0x3EBD9B96, 0xE41F5BF8, 0x71B42508, 0xFC4F6D5C, 0x089B8C0A,
-		0xCCC0A54F, 0xBE48CD5B, 0x448A4D14, 0x0180999F, 0x59F17262, 0x00EF2D50, 0x7ACB1F80,
+		0xCA52263C, 0xF7AC6370, 0xE992126B, 0x1A7B6D3C, 0xD2796435, 0x18921E8B, 0x8D910037,
+		0xF24D7D3F, 0xA10A8416, 0x94D0954D, 0x0D2C49FA, 0x94AA4D4A, 0xA7FE18D0, 0xB0289EC0,
+		0x1A7B6D3C, 0xD2796435, 0x18921E8B, 0x8D910037, 0xF24D7D3F, 0xA10A8416, 0x94D0954D,
+		0x0D2C49FA, 0x94AA4D4A, 0xA7FE18D0, 0xB0289EC0, 0x1A7B6D3C, 0xD2796435, 0xAE8C234C,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"distorted sprite strong HSS": {
-		0x87A93CA7, 0xF5CA0067, 0xFE515718, 0xF1C977AD, 0x2BD0D875, 0x54E9AC15, 0x5F53ED55,
-		0x92CA0C25, 0x4D41E525, 0x87A93CA7, 0xF5CA0067, 0xFE515718, 0xF1C977AD, 0x2BD0D875,
-		0x54E9AC15, 0x5F53ED55, 0x92CA0C25, 0x4D41E525, 0x87A93CA7, 0xF5CA0067, 0xFE515718,
-		0xF1C977AD, 0x2BD0D875, 0x54E9AC15, 0x5F53ED55, 0x92CA0C25, 0x4D41E525, 0xBCC31DC5,
+		0x52041123, 0x06221D34, 0x69BE0984, 0xCAA5706D, 0xC0A8EC4D, 0xBA7D749D, 0xFE891DBD,
+		0x6537CC45, 0x4D41E525, 0x52041123, 0x06221D34, 0x69BE0984, 0xCAA5706D, 0xC0A8EC4D,
+		0xBA7D749D, 0xFE891DBD, 0x6537CC45, 0x4D41E525, 0x52041123, 0x06221D34, 0x69BE0984,
+		0xCAA5706D, 0xC0A8EC4D, 0xBA7D749D, 0xFE891DBD, 0x6537CC45, 0x4D41E525, 0xBCC31DC5,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"distorted sprite half-transparent": {
-		0x9350575D, 0x7A42D905, 0xDEA4895D, 0x59F17262, 0x00EF2D50, 0x3EBD9B96, 0xE41F5BF8,
-		0x71B42508, 0xFC4F6D5C, 0x089B8C0A, 0xCCC0A54F, 0xBE48CD5B, 0x448A4D14, 0x0180999F,
-		0x59F17262, 0x00EF2D50, 0x3EBD9B96, 0xE41F5BF8, 0x71B42508, 0xFC4F6D5C, 0x089B8C0A,
-		0xCCC0A54F, 0xBE48CD5B, 0x448A4D14, 0x0180999F, 0x59F17262, 0x00EF2D50, 0x7ACB1F80,
+		0xCA52263C, 0xF7AC6370, 0xE992126B, 0x1A7B6D3C, 0xD2796435, 0x18921E8B, 0x8D910037,
+		0xF24D7D3F, 0xA10A8416, 0x94D0954D, 0x0D2C49FA, 0x94AA4D4A, 0xA7FE18D0, 0xB0289EC0,
+		0x1A7B6D3C, 0xD2796435, 0x18921E8B, 0x8D910037, 0xF24D7D3F, 0xA10A8416, 0x94D0954D,
+		0x0D2C49FA, 0x94AA4D4A, 0xA7FE18D0, 0xB0289EC0, 0x1A7B6D3C, 0xD2796435, 0xAE8C234C,
+		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
+	},
+	"distorted sprite converging half-transparent": {
+		0x9E7F3C8D, 0x4AA2D866, 0x7ED4BF7D, 0xDDCFE08C, 0xAA871505, 0xB1290795, 0xF4137E13,
+		0x7DB972F2, 0xC1B3026F, 0x800DCDE5, 0xA9346255, 0x7C2CC302, 0x3AAA0710, 0x69DBDC39,
+		0xDDCFE08C, 0xAA871505, 0xB1290795, 0xF4137E13, 0x7DB972F2, 0xC1B3026F, 0x800DCDE5,
+		0xA9346255, 0x7C2CC302, 0x3AAA0710, 0x69DBDC39, 0xDDCFE08C, 0xAA871505, 0x0C8A3325,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"polygon": {
-		0xBCC31DC5, 0x3E04232B, 0x0E6849C5, 0x77D6ADC5, 0x0E26D0A5, 0x16579C8B, 0xC9C66498,
-		0x01DB6E75, 0x7C6C6F85, 0x42AA6C19, 0xF1F4CEDE, 0xDA736E76, 0x05714951, 0x7F98C0C5,
-		0xD831FEA5, 0x8C3DC6E1, 0xB010D3D8, 0xA4787FB5, 0x0F944005, 0xCDC8F729, 0x12BD1A34,
-		0x5965DCD5, 0x5B30E5D9, 0x6F1C0035, 0xAA65589C, 0xA0C9F755, 0xF626EFE8, 0x658066F3,
+		0xBCC31DC5, 0x9355692B, 0x0AB1A5EB, 0x5C8B91C5, 0x5C8B91C5, 0xD3F93585, 0x397DD5A0,
+		0x527F73A4, 0xA8B42C55, 0xA8B42C55, 0xC5914A19, 0x14BB280E, 0xBB17681A, 0xA8365DC5,
+		0xA8365DC5, 0xE0D05AC5, 0x55C35420, 0x45F8BA74, 0xBFBB9635, 0xBFBB9635, 0xA3067489,
+		0xC088C4C9, 0xE36E40C5, 0x3672B3F0, 0x4C6B95E5, 0xBD723F91, 0x79703AFD, 0x68B0BE3E,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"polygon half-transparent": {
-		0xBCC31DC5, 0xAAED15C9, 0x13EBCDEA, 0xDB1797C5, 0xFF7C14BD, 0x0B054514, 0x9A2D7904,
-		0x62B09B48, 0x4CFB9E60, 0xA6F21CD8, 0xEB8B9705, 0xFE208EE3, 0xCD1D4D30, 0xB36D6105,
-		0x9FC474DE, 0xD1A0E212, 0xB98FF885, 0xB67B7CA3, 0x0C0CEA05, 0xD9B2E21B, 0xEDCE23C5,
-		0x2BFF05D1, 0xD9866BFD, 0x2D1F836D, 0x66CA68EF, 0x1EAB0F6B, 0x59BE060F, 0x5CC909E4,
+		0xBCC31DC5, 0x4CACECA9, 0xA0A03CB9, 0x2B89A0A5, 0x976CEC71, 0xEB788D18, 0x22C29D96,
+		0x097B8E9D, 0xB5E88AA3, 0xC068F57A, 0x1293CA01, 0x7F3DFE64, 0x48D388FF, 0xBDD29C8E,
+		0xDD814E14, 0x99117B90, 0x7DE09236, 0xAF431FDF, 0x6F1BF952, 0xC02F676F, 0x958EA7E1,
+		0x87B755B2, 0x3BC0B84F, 0xD273FB44, 0x1233883D, 0xC5459560, 0x4CC70FC4, 0xE9D5AE56,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"polygon mesh": {
-		0xBCC31DC5, 0xBCD1F1C5, 0x13333105, 0xAFA4E3C5, 0x1097766B, 0x22740B45, 0x61F1B163,
-		0xA90CE537, 0x21E514A5, 0x9F06013E, 0x146B9AC5, 0x93DDDE72, 0xA755A576, 0xE1990445,
-		0x07C62881, 0x231F43C5, 0xDBD94259, 0x0A57487D, 0x580E6DE5, 0x7E8B4454, 0x7D78A2C5,
-		0x91AC345D, 0xE03A0A19, 0x21039AED, 0xD6A44509, 0x62EDAC1D, 0x8E48E0A5, 0x5942A5C4,
+		0xBCC31DC5, 0x16659605, 0x8EC7CE6B, 0x960BFFC5, 0x960BFFC5, 0xBFF050AB, 0xBF981EFB,
+		0x52774786, 0x709EE84D, 0x709EE84D, 0xBA32EA66, 0x64AC94D2, 0x9CEE3D15, 0xE4E689C5,
+		0xE4E689C5, 0xDF9154E1, 0xCFD0A451, 0xBE7BE79C, 0xD0FFFDDD, 0xD0FFFDDD, 0x174B01DC,
+		0x15654FA8, 0xD34E14E5, 0x8EBDFE54, 0x32448745, 0xB00FC3BC, 0x3B346D51, 0xB1EE8558,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"polygon gouraud": {
-		0xBCC31DC5, 0x8CC94923, 0x1FF1EA02, 0x47EFBC64, 0xD43F94B6, 0x82386620, 0x74EA330C,
-		0x4CB931F6, 0xFDF8AC9C, 0x162CF966, 0x58E6D119, 0xFFD6CE82, 0x7371640E, 0xEE3CB068,
-		0xE6563DAA, 0xD0BC8486, 0x66EF4A78, 0xD2EBD4E2, 0x7AB0B360, 0x2F620022, 0x4E89D0A7,
-		0xA385DC3E, 0x00956E5B, 0x21B16138, 0x4CED5B7D, 0x52A6265D, 0x90A4374F, 0x5AE5500B,
+		0xBCC31DC5, 0xF338FC4E, 0xAB85A579, 0x9822A717, 0x4BCA0580, 0xDA7454A8, 0xF605CBDF,
+		0xA15761D5, 0x298BEA1F, 0x9D3823B4, 0x5CEC2EA5, 0x2DE2511B, 0x025D37EA, 0x937EAB4F,
+		0x8506A0EC, 0x999C6F63, 0xE8DA9037, 0x6CBEEFBE, 0xAC42DC63, 0x09DC76DC, 0xDF1AF125,
+		0x125954C1, 0x88E64E67, 0x2B7F5444, 0xB84F26BD, 0x37C87800, 0xF7142DE8, 0x558ACCD2,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"polyline and line gouraud": {
@@ -397,10 +648,10 @@ var benchVDP1Pins = map[string][]uint32{
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"mixed": {
-		0x03604CE1, 0x5AACB9A1, 0x1B69C7D9, 0x419D87E6, 0x55AD7F4E, 0xAE3DA81E, 0x00F98687,
-		0xCE76BAAC, 0x1B1C9C8A, 0x7EBD6645, 0x083E9410, 0x8A5EC2C8, 0x11B15C40, 0xE3DF5DBA,
-		0xAA220744, 0xB6D06E6A, 0x9301217C, 0x84995CA9, 0x8877512B, 0x42E29F31, 0xCAAE8914,
-		0x0DEB6A5E, 0x2BA606AA, 0xB41834B3, 0x131C86DF, 0x7AB5E31B, 0xBE0CAA74, 0x84CC342F,
+		0x03604CE1, 0x5AACB9A1, 0x9AC595DC, 0x28B42BC1, 0xB9A9706B, 0xCE7B1F26, 0x9623046A,
+		0xD46B96E9, 0x97CACBE5, 0xB319AEE8, 0x15E7919C, 0x2E61457B, 0xF0188DB0, 0x64C71E15,
+		0xE74165D7, 0x1BA32CA8, 0xC69F4F5B, 0xAE3BC474, 0xDA98EE69, 0x40ED05C4, 0x2667680C,
+		0x4F31B7DB, 0x556FFA04, 0x53E2AEED, 0x3AEE9033, 0xCFA13BC7, 0x8DC28CCC, 0xD1526EFF,
 		0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	},
 	"erase full frame": {

@@ -105,6 +105,10 @@ type game struct {
 	player     *replay.Player
 	replayDone bool
 
+	// gpuFellBack records that the GPU renderer's runtime fallback to
+	// software has been logged.
+	gpuFellBack bool
+
 	// rumbleEngine, when non-nil (-rumble given), is evaluated against
 	// emulated memory after each frame on the emulation goroutine. Its
 	// motor states cross to the ebiten goroutine through sharedMotors,

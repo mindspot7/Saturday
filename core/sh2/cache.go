@@ -132,10 +132,9 @@ func (c *CPU) cacheFill(way int, addr uint32) {
 	base := addr &^ 0xF
 	off := uint32(way)*1024 + entry*16
 	// Read the 16-byte line as one transaction so it cannot be torn by
-	// a concurrent write from another bus master (Section 8.4.1).
-	var line [16]byte
-	stall := c.bus.SH2FillLine(base, &line, int64(c.cycles), !c.isMaster)
-	copy(c.cacheData[off:off+16], line[:])
+	// a concurrent write from another bus master (Section 8.4.1),
+	// straight into the line's place in the data array.
+	stall := c.bus.SH2FillLine(base, (*[16]byte)(c.cacheData[off:off+16]), int64(c.cycles), !c.isMaster)
 	c.cacheTouch(entry, way)
 	c.busStall += stall
 }

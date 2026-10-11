@@ -9,7 +9,9 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// Maximum framebuffer dimensions for buffer allocation.
+// Starting framebuffer dimensions for buffer allocation: the largest
+// native Saturn mode. A larger frame, from a renderer above the native
+// resolution or a loaded state in a larger mode, grows the buffers.
 const (
 	maxFBWidth  = 704
 	maxFBHeight = 512
@@ -31,14 +33,16 @@ func newSharedFramebuffer(width, height int) *sharedFramebuffer {
 	}
 }
 
+// update copies the frame into the write buffer, growing it when the
+// frame is larger.
 func (sf *sharedFramebuffer) update(pixels []byte, stride, activeHeight int) {
 	sf.mu.Lock()
 	n := stride * activeHeight
-	if n > len(sf.writePixels) {
-		n = len(sf.writePixels)
-	}
 	if n > len(pixels) {
 		n = len(pixels)
+	}
+	if n > len(sf.writePixels) {
+		sf.writePixels = make([]byte, n)
 	}
 	copy(sf.writePixels[:n], pixels[:n])
 	sf.stride = stride
@@ -46,10 +50,15 @@ func (sf *sharedFramebuffer) update(pixels []byte, stride, activeHeight int) {
 	sf.mu.Unlock()
 }
 
+// read copies the write buffer into the read buffer, grown to the
+// write buffer's size, and returns it.
 func (sf *sharedFramebuffer) read() (pixels []byte, stride, activeHeight int) {
 	sf.mu.Lock()
 	stride = sf.stride
 	activeHeight = sf.activeHeight
+	if len(sf.readPixels) < len(sf.writePixels) {
+		sf.readPixels = make([]byte, len(sf.writePixels))
+	}
 	n := stride * activeHeight
 	if n > len(sf.writePixels) {
 		n = len(sf.writePixels)

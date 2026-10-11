@@ -1,23 +1,27 @@
 package core
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/user-none/erings/core/compute/screen"
+)
 
 // exbgTestFrame builds a w x h external frame whose pixel at (x, y) is
-// packed as R = x & 0xFF, G = y & 0xFF, B = x >> 8, so a sampled pixel
-// identifies its source position.
+// the decoded color R = x & 0xFF, G = y & 0xFF, B = x >> 8, so a
+// sampled pixel identifies its source position.
 func exbgTestFrame(w, h int) []uint32 {
 	rgb := make([]uint32, w*h)
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			rgb[y*w+x] = uint32(x&0xFF)<<16 | uint32(y&0xFF)<<8 | uint32(x>>8)
+			rgb[y*w+x] = exbgTestPixel(x, y)
 		}
 	}
 	return rgb
 }
 
-// exbgTestPixel is the packed value exbgTestFrame stores at (x, y).
+// exbgTestPixel is the decoded color exbgTestFrame stores at (x, y).
 func exbgTestPixel(x, y int) uint32 {
-	return uint32(x&0xFF)<<16 | uint32(y&0xFF)<<8 | uint32(x>>8)
+	return screen.PackColor(uint32(x&0xFF), uint32(y&0xFF), uint32(x>>8))
 }
 
 // fakeEXBGUnsized provides a frame with no display window (the whole
@@ -60,8 +64,8 @@ func setupEXBG(t *testing.T, src exbgSource) *VDP2 {
 }
 
 // exbgLayerPixel returns the NBG1 slot layer buffer pixel at (x, y).
-func exbgLayerPixel(v *VDP2, x, y int) uint32 {
-	return v.layerBufs[1][y*v.frame.width+x]
+func exbgLayerPixel(v *VDP2, swr *softwareRenderer, x, y int) uint32 {
+	return renderedLayerDot(v, swr, 1, x, y)
 }
 
 // TestEXBGUnsizedMapping verifies an external frame without a display
@@ -71,22 +75,23 @@ func exbgLayerPixel(v *VDP2, x, y int) uint32 {
 func TestEXBGUnsizedMapping(t *testing.T) {
 	src := &fakeEXBGUnsized{rgb: exbgTestFrame(300, 224), w: 300, h: 224}
 	v := setupEXBG(t, src)
-	renderTestFrame(v)
+	swr := newSoftwareRenderer(v)
+	renderTestFrame(v, swr)
 
 	base := uint32(5) << 24
 	for _, p := range [][2]int{{0, 0}, {17, 3}, {299, 100}, {150, 223}} {
 		want := base | exbgTestPixel(p[0], p[1])
-		if got := exbgLayerPixel(v, p[0], p[1]); got != want {
+		if got := exbgLayerPixel(v, swr, p[0], p[1]); got != want {
 			t.Errorf("pixel(%d,%d) = 0x%08X, want 0x%08X", p[0], p[1], got, want)
 		}
 	}
-	if got := exbgLayerPixel(v, 300, 0); got != 0 {
+	if got := exbgLayerPixel(v, swr, 300, 0); got != 0 {
 		t.Errorf("pixel(300,0) past the frame = 0x%08X, want transparent", got)
 	}
 
 	v.regs[vdp2CCCTL] = 1 << 1
-	renderTestFrame(v)
-	if got := exbgLayerPixel(v, 0, 0); got&layerCCBit == 0 {
+	renderTestFrame(v, swr)
+	if got := exbgLayerPixel(v, swr, 0, 0); got&layerCCBit == 0 {
 		t.Errorf("CCCTL NBG1 set: pixel(0,0) = 0x%08X, want CC bit", got)
 	}
 }
@@ -96,18 +101,20 @@ func TestEXBGUnsizedMapping(t *testing.T) {
 func TestEXBGPriorityZeroDisables(t *testing.T) {
 	src := &fakeEXBGUnsized{rgb: exbgTestFrame(320, 224), w: 320, h: 224}
 	v := setupEXBG(t, src)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2PRINA] = 0x0000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if v.frame.exbgOn {
 		t.Error("NBG1 slot priority 0: EXBG should be off")
 	}
-	if got := exbgLayerPixel(v, 5, 5); got != 0 {
+	if got := exbgLayerPixel(v, swr, 5, 5); got != 0 {
 		t.Errorf("priority 0: pixel(5,5) = 0x%08X, want transparent", got)
 	}
 
 	v = setupEXBG(t, src)
+	swr = newSoftwareRenderer(v)
 	v.regs[vdp2EXTEN] = 0x0000
-	renderTestFrame(v)
+	renderTestFrame(v, swr)
 	if v.frame.exbgOn {
 		t.Error("EXTEN clear: EXBG should be off")
 	}
@@ -118,6 +125,7 @@ func TestEXBGPriorityZeroDisables(t *testing.T) {
 func TestEXBGReplacesNBG1(t *testing.T) {
 	src := &fakeEXBGUnsized{rgb: exbgTestFrame(320, 224), w: 320, h: 224}
 	v := setupEXBG(t, src)
+	swr := newSoftwareRenderer(v)
 	// NBG1: 16-color 1x1 cells, 2-word names, plane A page 0, a red tile
 	// at cell (0,0).
 	v.regs[vdp2BGON] |= 0x0002
@@ -131,14 +139,14 @@ func TestEXBGReplacesNBG1(t *testing.T) {
 	writeRBGTestPalette(v)
 
 	v.regs[vdp2EXTEN] = 0x0000
-	renderTestFrame(v)
-	if got := exbgLayerPixel(v, 0, 0); uint8(got>>16) != 255 || uint8(got>>8) != 0 {
+	renderTestFrame(v, swr)
+	if got := exbgLayerPixel(v, swr, 0, 0); screen.ColorR(got) != 248 || screen.ColorG(got) != 0 {
 		t.Fatalf("EXTEN clear: NBG1 pixel(0,0) = 0x%08X, want red", got)
 	}
 
 	v.regs[vdp2EXTEN] = 0x0001
-	renderTestFrame(v)
-	if got := exbgLayerPixel(v, 0, 0); got != uint32(5)<<24|exbgTestPixel(0, 0) {
+	renderTestFrame(v, swr)
+	if got := exbgLayerPixel(v, swr, 0, 0); got != uint32(5)<<24|exbgTestPixel(0, 0) {
 		t.Errorf("EXTEN set: slot pixel(0,0) = 0x%08X, want the external frame", got)
 	}
 	if v.frame.nbgOn[1] {
@@ -156,14 +164,15 @@ func TestEXBGSizedWindow(t *testing.T) {
 		dx: 23, dy: 49, dw: 160, dh: 120, sx: 10, sy: 20, rx: 1000, ry: 1000,
 	}
 	v := setupEXBG(t, src)
-	renderTestFrame(v)
+	swr := newSoftwareRenderer(v)
+	renderTestFrame(v, swr)
 	if v.exbgDX != 24 || v.exbgDY != 41 {
 		t.Fatalf("placement = (%d,%d), want (24,41)", v.exbgDX, v.exbgDY)
 	}
 	base := uint32(5) << 24
 	check := func(x, y int, want uint32) {
 		t.Helper()
-		if got := exbgLayerPixel(v, x, y); got != want {
+		if got := exbgLayerPixel(v, swr, x, y); got != want {
 			t.Errorf("pixel(%d,%d) = 0x%08X, want 0x%08X", x, y, got, want)
 		}
 	}
@@ -194,9 +203,10 @@ func TestEXBGWindowRatios(t *testing.T) {
 				dx: 23, dy: 49, dw: 160, dh: 120, rx: tc.rx, ry: tc.ry,
 			}
 			v := setupEXBG(t, src)
-			renderTestFrame(v)
+			swr := newSoftwareRenderer(v)
+			renderTestFrame(v, swr)
 			want := uint32(5)<<24 | exbgTestPixel(tc.sx, tc.sy)
-			if got := exbgLayerPixel(v, 24+3, 41+3); got != want {
+			if got := exbgLayerPixel(v, swr, 24+3, 41+3); got != want {
 				t.Errorf("window pixel(3,3) = 0x%08X, want 0x%08X", got, want)
 			}
 		})
@@ -213,27 +223,147 @@ func TestEXBGWindowClippedLeftAndSourceEnd(t *testing.T) {
 		dx: -31, dy: 49, dw: 160, dh: 120, rx: 1000, ry: 1000,
 	}
 	v := setupEXBG(t, src)
-	renderTestFrame(v)
+	swr := newSoftwareRenderer(v)
+	renderTestFrame(v, swr)
 	if v.exbgDX != -30 {
 		t.Fatalf("placement X = %d, want -30", v.exbgDX)
 	}
 	base := uint32(5) << 24
-	if got := exbgLayerPixel(v, 0, 41); got != base|exbgTestPixel(30, 0) {
+	if got := exbgLayerPixel(v, swr, 0, 41); got != base|exbgTestPixel(30, 0) {
 		t.Errorf("pixel(0,41) = 0x%08X, want source column 30", got)
 	}
 	// Window pixels 0..129 map to source columns 30..159; the source
 	// is 100 wide, so screen x 70 and beyond are transparent.
-	if got := exbgLayerPixel(v, 69, 41); got != base|exbgTestPixel(99, 0) {
+	if got := exbgLayerPixel(v, swr, 69, 41); got != base|exbgTestPixel(99, 0) {
 		t.Errorf("pixel(69,41) = 0x%08X, want source column 99", got)
 	}
-	if got := exbgLayerPixel(v, 70, 41); got != 0 {
+	if got := exbgLayerPixel(v, swr, 70, 41); got != 0 {
 		t.Errorf("pixel(70,41) = 0x%08X, want transparent past the source row", got)
 	}
 	// Source is 60 rows high: window row 60 (screen y 101) is transparent.
-	if got := exbgLayerPixel(v, 0, 41+59); got != base|exbgTestPixel(30, 59) {
+	if got := exbgLayerPixel(v, swr, 0, 41+59); got != base|exbgTestPixel(30, 59) {
 		t.Errorf("pixel(0,100) = 0x%08X, want source row 59", got)
 	}
-	if got := exbgLayerPixel(v, 0, 41+60); got != 0 {
+	if got := exbgLayerPixel(v, swr, 0, 41+60); got != 0 {
 		t.Errorf("pixel(0,101) = 0x%08X, want transparent past the source height", got)
+	}
+}
+
+// TestEXBGScaledBlockCorners holds the external image's scaled rows to
+// its native rows at scale shifts 1 to 3: over unsized and sized
+// windows, a window whose left edge lies off screen, a video wider
+// than its window, and enlarged and reduced windows, the sub-dot at
+// (N*x, N*y) is the native dot at (x, y). At a 1:1 ratio every
+// sub-dot of a block is its native dot. Otherwise each sub-dot reads
+// a video pixel between its block corner's and the next block
+// corner's on each axis, and a reduced window's scaled rows read
+// video columns its native rows step over.
+func TestEXBGScaledBlockCorners(t *testing.T) {
+	source := func(px uint32) (col, row int) {
+		return int(screen.ColorR(px) | screen.ColorB(px)<<8), int(screen.ColorG(px))
+	}
+	between := func(v, a, b int) bool { return min(a, b) <= v && v <= max(a, b) }
+	for _, tc := range []struct {
+		name string
+		src  exbgSource
+		one  bool // 1:1 ratio
+	}{
+		{"unsized, video wider than the screen", &fakeEXBGUnsized{rgb: exbgTestFrame(352, 240), w: 352, h: 240}, true},
+		{"sized 1:1", &fakeEXBGWindow{rgb: exbgTestFrame(352, 240), w: 352, h: 240,
+			dx: 23, dy: 49, dw: 160, dh: 120, sx: 10, sy: 20, rx: 1000, ry: 1000}, true},
+		{"left edge off screen", &fakeEXBGWindow{rgb: exbgTestFrame(100, 60), w: 100, h: 60,
+			dx: -31, dy: 49, dw: 160, dh: 120, rx: 1300, ry: 1000}, false},
+		{"enlarged", &fakeEXBGWindow{rgb: exbgTestFrame(352, 240), w: 352, h: 240,
+			dx: 23, dy: 9, dw: 280, dh: 200, sx: 3, sy: 5, rx: 450, ry: 700}, false},
+		{"reduced", &fakeEXBGWindow{rgb: exbgTestFrame(352, 240), w: 352, h: 240,
+			dx: 40, dy: 30, dw: 120, dh: 90, sx: 7, sy: 2, rx: 2000, ry: 1500}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := setupEXBG(t, tc.src)
+			swr := newSoftwareRenderer(v)
+			renderTestFrame(v, swr)
+			width, height := v.frame.width, v.frame.height
+			native := make([]uint32, width*height)
+			lit := 0
+			for y := range height {
+				v.exbgCopyRow(native, y, y, 0, 0)
+			}
+			for _, px := range native {
+				if px != 0 {
+					lit++
+				}
+			}
+			if lit == 0 {
+				t.Fatal("no external image dot drawn")
+			}
+			nativeCols, nativeRows := make(map[int]bool), make(map[int]bool)
+			for _, px := range native {
+				if px != 0 {
+					c, r := source(px)
+					nativeCols[c], nativeRows[r] = true, true
+				}
+			}
+			for shift := uint32(1); shift <= 3; shift++ {
+				n := 1 << shift
+				sw := width * n
+				scaled := make([]uint32, sw*height*n)
+				for y := range height {
+					for k := range n {
+						v.exbgCopyRow(scaled, y*n+k, y, k, shift)
+					}
+				}
+				scaledCols, scaledRows := make(map[int]bool), make(map[int]bool)
+				for y := range height {
+					for x := range width {
+						want := native[y*width+x]
+						if got := scaled[y*n*sw+x*n]; got != want {
+							t.Fatalf("shift %d: sub-dot (%d, %d) = %08x, want the native %08x", shift, x*n, y*n, got, want)
+						}
+						for k := range n {
+							for j := range n {
+								got := scaled[(y*n+k)*sw+x*n+j]
+								if tc.one {
+									if got != want {
+										t.Fatalf("shift %d: sub-dot (%d, %d) = %08x, want the native %08x", shift, x*n+j, y*n+k, got, want)
+									}
+									continue
+								}
+								if got == 0 || want == 0 || x+1 == width || y+1 == height {
+									continue
+								}
+								right, below := native[y*width+x+1], native[(y+1)*width+x]
+								if right == 0 || below == 0 {
+									continue
+								}
+								c, r := source(got)
+								scaledCols[c], scaledRows[r] = true, true
+								c0, r0 := source(want)
+								c1, _ := source(right)
+								_, r1 := source(below)
+								if !between(c, c0, c1) || !between(r, r0, r1) {
+									t.Fatalf("shift %d: sub-dot (%d, %d) reads video (%d, %d), outside (%d, %d) to (%d, %d)", shift, x*n+j, y*n+k, c, r, c0, r0, c1, r1)
+								}
+							}
+						}
+					}
+				}
+				if tc.name == "reduced" {
+					extraCols, extraRows := 0, 0
+					for c := range scaledCols {
+						if !nativeCols[c] {
+							extraCols++
+						}
+					}
+					for r := range scaledRows {
+						if !nativeRows[r] {
+							extraRows++
+						}
+					}
+					if extraCols == 0 || extraRows == 0 {
+						t.Errorf("shift %d: the scaled rows read %d video columns and %d video rows the native rows step over, want some of each", shift, extraCols, extraRows)
+					}
+				}
+			}
+		})
 	}
 }

@@ -55,7 +55,7 @@ func (f *Factory) SystemInfo() coreif.SystemInfo {
 		Name:             erings.Name,
 		ConsoleName:      "Sega Saturn",
 		ScreenWidth:      704,
-		MaxScreenHeight:  512,
+		ScreenHeight:     512,
 		PixelAspectRatio: 1.0,
 		SampleRate:       44100,
 		Buttons:          saturnButtons(),
@@ -83,6 +83,16 @@ func (f *Factory) SystemInfo() coreif.SystemInfo {
 				Type:        coreif.CoreOptionBool,
 				Default:     "true",
 				Category:    coreif.CoreOptionCategoryCore,
+			},
+			{
+				Key:         "upscale",
+				Label:       "Internal Resolution",
+				Description: "Render at a multiple of the native resolution",
+				Type:        coreif.CoreOptionSelect,
+				Default:     "1x",
+				Values:      core.UpscaleNames(),
+				Category:    coreif.CoreOptionCategoryVideo,
+				PerGame:     true,
 			},
 		},
 		BIOSOptions: []coreif.BIOSOption{
@@ -195,8 +205,26 @@ func (e *emulator) GetAudioSamples() []int16            { return e.emu.GetAudioS
 func (e *emulator) SetInput(player int, buttons uint32) { e.emu.SetInput(player, buttons) }
 func (e *emulator) SetOption(key string, value string)  { e.emu.SetOption(key, value) }
 func (e *emulator) SetRom(data []byte)                  {} // Saturn is disc-only
-func (e *emulator) Start()                              { e.emu.Start() }
 func (e *emulator) Close()                              { e.emu.Close() }
+
+// Start selects the GPU renderer, falling back to software when it
+// cannot open, then starts the core. The renderer is selected here,
+// after every option is applied, so it opens once at the chosen
+// upscale.
+func (e *emulator) Start() {
+	e.emu.SetRenderer(core.RendererGPU)
+	e.emu.Start()
+}
+
+// RenderInfo implements coreif.RenderInfoProvider.
+func (e *emulator) RenderInfo() coreif.RenderInfo {
+	info := e.emu.RenderInfo()
+	return coreif.RenderInfo{Backend: info.Backend, Device: info.Device, Scale: info.Scale}
+}
+
+// GameFrameCount implements coreif.RenderInfoProvider: the count of
+// VDP1 frame buffer swaps, the frames the game has displayed.
+func (e *emulator) GameFrameCount() uint64 { return e.emu.VDP1SwapCount() }
 
 func (e *emulator) ReadMemory(addr uint32, buf []byte) uint32 {
 	return e.emu.ReadMemory(addr, buf)

@@ -30,8 +30,8 @@ have fun playing some amazing classic games.
     <td align="center"><img src="screenshots/ui_details.webp" width="270"><br>Game details</td>
   </tr>
   <tr>
-    <td align="center"><img src="screenshots/bulk_slash.webp" width="270"><br>Bulk Slash</td>
-    <td align="center"><img src="screenshots/burning_rangers.webp" width="270"><br>Burning Rangers</td>
+    <td align="center"><img src="screenshots/bulk_slash_4x.webp" width="270"><br>Bulk Slash (4x)</td>
+    <td align="center"><img src="screenshots/panzer_dragoon_zwei_4x.webp" width="270"><br>Panzer Dragoon Zwei (4x)</td>
     <td align="center"><img src="screenshots/waku_waku_7.webp" width="270"><br>Waku Waku 7</td>
   </tr>
 </table>
@@ -47,10 +47,33 @@ have fun playing some amazing classic games.
 - Internal backup RAM (console saves) persists between sessions
 - Save states
 - MPEG card
+- Internal resolution upscaling
 
 BIOS region patching is supported. Meaning you can use a US BIOS to play
 Japanese games or a Japanese BIOS to play US games. Or just use the HLE BIOS
 and not worry about it.
+
+## Rendering
+
+Frames are rendered on the host GPU by default. The VDP1 and VDP2 pixel
+pipelines are written once and run either as ordinary Go on the CPU or as
+compute shaders on the GPU, so both renderers produce the same output. The
+GPU backend is selected by platform.
+
+| Platform | Backend |
+|----------|---------|
+| macOS | Metal |
+| Windows | Direct3D 12 |
+| Linux | Vulkan 1.3 |
+
+The GPU renderer needs a hardware device. Software implementations of a
+GPU (such as WARP or lavapipe) are not used. When no usable device is
+found, or the device fails while a game is running, rendering falls back
+to the CPU software renderer for the rest of the session.
+
+The internal resolution option renders at a multiple of the Saturn's
+native resolution (1x through 16x) on either renderer. Higher scales cost
+more memory and render time.
 
 ## Disc formats
 
@@ -89,6 +112,7 @@ Game controls (D-pad, buttons) are configured in the UI's input settings.
 |-----|--------|
 | Escape | Open / close the pause menu (also Select on a gamepad) |
 | Tab | Toggle the achievement overlay |
+| ~ | Performance metrics overlay |
 | R (hold) | Rewind while held |
 | F1 | Save state to the current slot |
 | F2 | Next save state slot |
@@ -110,9 +134,7 @@ Game controls (D-pad, buttons) are configured in the UI's input settings.
 - Disc swapping for multi-disc games
   - Right now you have to rely on the game saving, exiting the game
     and selecting the next game from the ui
-- GPU compute shaders
-  - Internal resolution upscaling
-  - Other graphical enhancements
+- Various graphical enhancements
 - Possible performance enhancements
 - Bug fixes
 - Better game compatibility

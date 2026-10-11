@@ -147,6 +147,10 @@ func (g *game) emulationLoop() {
 			g.emu.RunFrame()
 			runDur := time.Since(runStart)
 			g.emuFrame++
+			if err := g.emu.GPUError(); err != nil && !g.gpuFellBack {
+				g.gpuFellBack = true
+				fmt.Printf("[RENDER] frame %d: GPU renderer failed, now software: %v\n", g.emuFrame, err)
+			}
 
 			// Record the input applied to this frame. buttons is the
 			// snapshot read above and fed to SetInput, so it is exactly

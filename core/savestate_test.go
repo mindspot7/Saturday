@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/s2"
+
+	"github.com/user-none/erings/core/compute/draw"
 )
 
 type stateHeader struct {
@@ -226,6 +228,13 @@ func TestSerializeValues(t *testing.T) {
 	e.scsp.slots[7].egLevel = -12345
 	e.vdp1.copr = 0x0040
 	e.cdblock.getSectorLen = 2
+	e.cdblock.fsFiles = []cdcFile{
+		{fad: 0x1234, size: 0x56789, gapSize: 1, unitSize: 2, fileNum: 2, attr: 0x02},
+		{fad: 0xABCD, size: 0x10, fileNum: 3},
+	}
+	e.bus.busyUntil[areaSCU] = 0x1122334455
+	e.bus.masterPendingWrite = pendingWrite{until: 0x66778899AA, cost: 12}
+	e.sinitPending.Store(true)
 	sec := bufferedSector{
 		data:       make([]byte, 2352),
 		size:       2352,
@@ -317,6 +326,43 @@ func TestSerializeValues(t *testing.T) {
 	}
 	if got := binary.BigEndian.Uint64(chunks[tagEmu]["lineWidthAccum"]); got != 0x123456789A {
 		t.Errorf("EMU lineWidthAccum = %x, want 123456789a", got)
+	}
+	if got := chunks[tagEmu]["sinitPending"]; len(got) != 1 || got[0] != 1 {
+		t.Errorf("EMU sinitPending = %v, want [1]", got)
+	}
+	if got := chunks[tagEmu]["minitPending"]; len(got) != 1 || got[0] != 0 {
+		t.Errorf("EMU minitPending = %v, want [0]", got)
+	}
+	bu := chunks[tagBusMisc]["busyUntil"]
+	if len(bu) != int(areaCount)*8 {
+		t.Fatalf("BUS_MISC busyUntil size = %d, want %d", len(bu), int(areaCount)*8)
+	}
+	if got := binary.BigEndian.Uint64(bu[areaSCU*8:]); got != 0x1122334455 {
+		t.Errorf("BUS_MISC busyUntil[areaSCU] = %x, want 1122334455", got)
+	}
+	if got := binary.BigEndian.Uint64(chunks[tagBusMisc]["masterPendingWrite.until"]); got != 0x66778899AA {
+		t.Errorf("BUS_MISC masterPendingWrite.until = %x, want 66778899aa", got)
+	}
+	if got := binary.BigEndian.Uint32(chunks[tagBusMisc]["masterPendingWrite.cost"]); got != 12 {
+		t.Errorf("BUS_MISC masterPendingWrite.cost = %d, want 12", got)
+	}
+	// fsFiles: u32 count, then per file fad u32, size u32, gapSize,
+	// unitSize, fileNum, attr u8.
+	ff := chunks[tagCDState]["fsFiles"]
+	if len(ff) != 4+2*12 || binary.BigEndian.Uint32(ff) != 2 {
+		t.Fatalf("CD_STATE fsFiles = %d bytes, count %d, want 28 and 2", len(ff), binary.BigEndian.Uint32(ff))
+	}
+	if got := binary.BigEndian.Uint32(ff[4:]); got != 0x1234 {
+		t.Errorf("CD_STATE fsFiles[0].fad = %x, want 1234", got)
+	}
+	if got := binary.BigEndian.Uint32(ff[8:]); got != 0x56789 {
+		t.Errorf("CD_STATE fsFiles[0].size = %x, want 56789", got)
+	}
+	if ff[12] != 1 || ff[13] != 2 || ff[14] != 2 || ff[15] != 0x02 {
+		t.Errorf("CD_STATE fsFiles[0] bytes = %v, want gap 1 unit 2 fileNum 2 attr 2", ff[12:16])
+	}
+	if got := binary.BigEndian.Uint32(ff[16:]); got != 0xABCD {
+		t.Errorf("CD_STATE fsFiles[1].fad = %x, want abcd", got)
 	}
 	if got := int32(binary.BigEndian.Uint32(chunks[tagSCSPSlots]["egLevel"][7*4:])); got != -12345 {
 		t.Errorf("SCSP slot7 egLevel = %d, want -12345", got)
@@ -439,14 +485,27 @@ func fillEmulatorState(e *Emulator) {
 	e.scsp.soundReqPending.Store(true)
 	e.vdp1.copr = 0x0040
 	e.vdp1.lateEraseFB = e.vdp1.displayFB
-	e.vdp1.distortedResume.pxFP = -99887766
-	e.vdp1.distortedResume.cc = 3
+	e.vdp1.cmd.st.Quad.DPX = -99887766
+	e.vdp1.cmd.cc = 3
 	e.vdp1.drawTicked.Store(5000)
 	e.vdp1.drawStallCharged.Store(1234)
 	e.pendingSystemReset.Store(true)
+	e.sinitPending.Store(true)
 	e.lineWidthAccum = 0x123456789A
 	e.bus.minitWritten = true
+	e.bus.busyUntil[areaSCU] = 0x1122334455
+	e.bus.masterPendingWrite = pendingWrite{until: 0x66778899AA, cost: 12}
+	e.bus.slavePendingWrite = pendingWrite{until: -5, cost: 3}
 	e.cdblock.getSectorLen = 2
+	e.cdblock.fsInitialized = true
+	e.cdblock.fsRootLBA = 0x16
+	e.cdblock.fsRootSize = 0x1800
+	e.cdblock.fsFiles = []cdcFile{
+		{fad: 0x1234, size: 0x56789, gapSize: 1, unitSize: 2, fileNum: 2, attr: 0x02},
+		{fad: 0xABCD, size: 0x10, fileNum: 3},
+	}
+	e.cdblock.delStart = 1
+	e.cdblock.delCount = 2
 	e.cdblock.dataBuf = []uint16{0x1122, 0x3344}
 	e.cdblock.dataPos = 1
 	e.cdblock.putBuf = []byte{9, 8, 7}
@@ -531,12 +590,39 @@ func TestStateRoundTrip(t *testing.T) {
 	if got := e2.vdp1.drawStallCharged.Load(); got != 1234 {
 		t.Errorf("restored drawStallCharged = %d, want 1234", got)
 	}
-	// pixCycles is derived from cc at decode, not stored.
-	if got := e2.vdp1.distortedResume.pixCycles; got != vdp1PixelCycles(3) {
-		t.Errorf("restored dist pixCycles = %d, want %d", got, vdp1PixelCycles(3))
+	// The pixel cycles derive from cc at decode, not stored.
+	if got := e2.vdp1.cmd.st.PixCycles; got != vdp1PixelCycles(3) {
+		t.Errorf("restored draw pixel cycles = %d, want %d", got, vdp1PixelCycles(3))
+	}
+	if got := e2.vdp1.cmd.st.Quad.DPX; got != -99887766 {
+		t.Errorf("restored draw quad DPX = %d, want -99887766", got)
 	}
 	if !e2.pendingSystemReset.Load() {
 		t.Errorf("restored pendingSystemReset not set")
+	}
+	if !e2.sinitPending.Load() || e2.minitPending.Load() {
+		t.Errorf("restored MINIT/SINIT pending = %v/%v, want false/true",
+			e2.minitPending.Load(), e2.sinitPending.Load())
+	}
+	if got := e2.bus.busyUntil[areaSCU]; got != 0x1122334455 {
+		t.Errorf("restored busyUntil[areaSCU] = %x, want 1122334455", got)
+	}
+	if got := e2.bus.masterPendingWrite; got != (pendingWrite{until: 0x66778899AA, cost: 12}) {
+		t.Errorf("restored masterPendingWrite = %+v", got)
+	}
+	if got := e2.bus.slavePendingWrite; got != (pendingWrite{until: -5, cost: 3}) {
+		t.Errorf("restored slavePendingWrite = %+v", got)
+	}
+	cb := e2.cdblock
+	if !cb.fsInitialized || cb.fsRootLBA != 0x16 || cb.fsRootSize != 0x1800 {
+		t.Errorf("restored fs root = %v/%x/%x, want true/16/1800", cb.fsInitialized, cb.fsRootLBA, cb.fsRootSize)
+	}
+	if len(cb.fsFiles) != 2 || cb.fsFiles[0] != (cdcFile{fad: 0x1234, size: 0x56789, gapSize: 1, unitSize: 2, fileNum: 2, attr: 0x02}) ||
+		cb.fsFiles[1] != (cdcFile{fad: 0xABCD, size: 0x10, fileNum: 3}) {
+		t.Errorf("restored fsFiles = %+v", cb.fsFiles)
+	}
+	if cb.delStart != 1 || cb.delCount != 2 {
+		t.Errorf("restored delStart/delCount = %d/%d, want 1/2", cb.delStart, cb.delCount)
 	}
 }
 
@@ -623,28 +709,30 @@ func rebuildState(t *testing.T, e *Emulator, version uint32, edit func(chunks ma
 	}
 	edit(chunks)
 
-	// Rebuild the body in the original chunk order by re-walking it.
-	var out []byte
+	// Rebuild the body in the original chunk order by re-walking it,
+	// framing each chunk as Serialize does.
+	var a chunkAssembler
 	bp := 0
 	for bp < len(body) {
 		rawTag := body[bp : bp+stateTagLen]
 		tag := string(rawTag[:bytes.IndexByte(rawTag, 0)])
 		clen := int(binary.BigEndian.Uint32(body[bp+stateTagLen:]))
 		payload := body[bp+stateTagLen+4 : bp+stateTagLen+4+clen]
-		var w fieldWriter
-		fp := 0
-		for fp < len(payload) {
-			nlen := int(payload[fp])
-			name := string(payload[fp+1 : fp+1+nlen])
-			fsize := int(binary.BigEndian.Uint32(payload[fp+1+nlen:]))
-			fp += 1 + nlen + 4 + fsize
-			if data, ok := chunks[tag][name]; ok {
-				w.raw(name, data)
+		a.chunk(tag, func(w *fieldWriter) {
+			fp := 0
+			for fp < len(payload) {
+				nlen := int(payload[fp])
+				name := string(payload[fp+1 : fp+1+nlen])
+				fsize := int(binary.BigEndian.Uint32(payload[fp+1+nlen:]))
+				fp += 1 + nlen + 4 + fsize
+				if data, ok := chunks[tag][name]; ok {
+					w.raw(name, data)
+				}
 			}
-		}
-		out = appendChunk(out, tag, w.b)
+		})
 		bp += stateTagLen + 4 + clen
 	}
+	out := a.b
 
 	// Single-segment payload (count=1) is valid regardless of size.
 	comp := s2.Encode(nil, out)
@@ -707,6 +795,79 @@ func TestDeserializeOldStateSkipsMissingFields(t *testing.T) {
 		t.Errorf("skipped fields = %d/%v/%v, want 0/false/false",
 			m.playMode, m.vidPaused, m.vidFrozen)
 	}
+
+	// The CD filesystem cache, the bus timing state, and the MINIT/SINIT
+	// flags were added to CD_STATE, BUS_MISC, and EMU after the first
+	// version-6 states were written.
+	e = NewEmulator()
+	fillEmulatorState(e)
+	old = rebuildState(t, e, stateMinVersion, func(chunks map[string]map[string][]byte) {
+		for _, f := range []struct{ chunk, field string }{
+			{tagCDState, "fsInitialized"}, {tagCDState, "fsRootLBA"},
+			{tagCDState, "fsRootSize"}, {tagCDState, "fsFiles"},
+			{tagBusMisc, "busyUntil"},
+			{tagBusMisc, "masterPendingWrite.until"}, {tagBusMisc, "masterPendingWrite.cost"},
+			{tagBusMisc, "slavePendingWrite.until"}, {tagBusMisc, "slavePendingWrite.cost"},
+			{tagEmu, "minitPending"}, {tagEmu, "sinitPending"},
+		} {
+			if _, ok := chunks[f.chunk][f.field]; !ok {
+				t.Fatalf("field %s.%s not found", f.chunk, f.field)
+			}
+			delete(chunks[f.chunk], f.field)
+		}
+	})
+	e2 = NewEmulator()
+	fillEmulatorState(e2)
+	if err := e2.Deserialize(old); err != nil {
+		t.Fatalf("Deserialize state without the added fields: %v", err)
+	}
+	cb := e2.cdblock
+	if cb.fsInitialized || cb.fsRootLBA != 0 || cb.fsRootSize != 0 || cb.fsFiles != nil {
+		t.Errorf("skipped fs fields = %v/%x/%x/%v, want zero", cb.fsInitialized, cb.fsRootLBA, cb.fsRootSize, cb.fsFiles)
+	}
+	if e2.bus.busyUntil != ([areaCount]int64{}) || e2.bus.masterPendingWrite != (pendingWrite{}) ||
+		e2.bus.slavePendingWrite != (pendingWrite{}) {
+		t.Errorf("skipped bus timing = %v/%+v/%+v, want zero", e2.bus.busyUntil, e2.bus.masterPendingWrite, e2.bus.slavePendingWrite)
+	}
+	if e2.minitPending.Load() || e2.sinitPending.Load() {
+		t.Errorf("skipped MINIT/SINIT pending not cleared")
+	}
+}
+
+// TestDeserializeOldStateDrawOpFBHeight verifies a state written
+// before the draw op carried its frame buffer height and scale shift:
+// the restored op's height is its buffer's rows in its format, and
+// its scale shift is native.
+func TestDeserializeOldStateDrawOpFBHeight(t *testing.T) {
+	for _, c := range []struct {
+		width  int32
+		is8bpp bool
+		want   int32
+	}{
+		{512, false, 256},
+		{1024, true, 256},
+		{512, true, 512},
+	} {
+		e := NewEmulator()
+		p := &e.vdp1.cmd.op.Pixel
+		p.FBWidth, p.Is8bpp, p.FBHeight, p.ScaleShift = c.width, c.is8bpp, 99, 2
+		old := rebuildState(t, e, stateMinVersion, func(chunks map[string]map[string][]byte) {
+			for _, name := range []string{"draw.op.pixel.fbHeight", "draw.op.pixel.scaleShift"} {
+				if _, ok := chunks[tagVDP1Resume][name]; !ok {
+					t.Fatalf("field %s.%s not found", tagVDP1Resume, name)
+				}
+				delete(chunks[tagVDP1Resume], name)
+			}
+		})
+		e2 := NewEmulator()
+		if err := e2.Deserialize(old); err != nil {
+			t.Fatalf("Deserialize state without the fields: %v", err)
+		}
+		got := e2.vdp1.cmd.op.Pixel
+		if got.FBHeight != c.want || got.ScaleShift != 0 {
+			t.Errorf("width %d 8bpp %v: FBHeight %d scale shift %d, want %d and 0", c.width, c.is8bpp, got.FBHeight, got.ScaleShift, c.want)
+		}
+	}
 }
 
 // TestDeserializeHostileValues verifies range validation on values that
@@ -742,6 +903,65 @@ func TestDeserializeHostileValues(t *testing.T) {
 		!strings.Contains(err.Error(), "latch") {
 		t.Errorf("hostile latch ownership error = %v", err)
 	}
+
+	// Values that bound a slice or a loop after restore.
+	i64 := func(v int64) []byte { return binary.BigEndian.AppendUint64(nil, uint64(v)) }
+	for _, c := range []struct {
+		chunk, field string
+		data         []byte
+	}{
+		{tagCDState, "delStart", i64(-1)},
+		{tagCDState, "delCount", i64(-1)},
+		{tagCDState, "delCount", i64(cdMaxSectors + 1)},
+		{tagCDMpeg, "vsyncAccum", i64(-1)},
+		{tagCDMpeg, "vsyncAccum", i64(math.MaxInt64)},
+		{tagCDMpeg, "pictCycles", i64(-1)},
+		{tagCDMpeg, "hostSteps", i64(-1)},
+	} {
+		bad = rebuildStateWithField(t, e, c.chunk, c.field, c.data)
+		if err := NewEmulator().Deserialize(bad); err == nil ||
+			!strings.Contains(err.Error(), c.field) {
+			t.Errorf("hostile %s.%s = %v: error = %v", c.chunk, c.field, c.data, err)
+		}
+	}
+
+	// A pending write costing more than any write transaction.
+	cost := binary.BigEndian.AppendUint32(nil, busWriteCostMax()+1)
+	bad = rebuildStateWithField(t, e, tagBusMisc, "slavePendingWrite.cost", cost)
+	if err := NewEmulator().Deserialize(bad); err == nil ||
+		!strings.Contains(err.Error(), "pendingWrite.cost") {
+		t.Errorf("hostile pendingWrite.cost error = %v", err)
+	}
+
+	// pictAccum past the tick's four-picture clamp of pictCycles.
+	withPict := func(accum int64) []byte {
+		return rebuildState(t, e, stateVersion, func(chunks map[string]map[string][]byte) {
+			chunks[tagCDMpeg]["pictCycles"] = i64(100)
+			chunks[tagCDMpeg]["pictAccum"] = i64(accum)
+		})
+	}
+	if err := NewEmulator().Deserialize(withPict(401)); err == nil ||
+		!strings.Contains(err.Error(), "pictAccum") {
+		t.Errorf("hostile pictAccum error = %v", err)
+	}
+	if err := NewEmulator().Deserialize(withPict(400)); err != nil {
+		t.Errorf("pictAccum at the clamp: %v", err)
+	}
+
+	// fsFiles: more entries than a directory can hold, and a record
+	// count that disagrees with the field size.
+	count255 := binary.BigEndian.AppendUint32(nil, 255)
+	bad = rebuildStateWithField(t, e, tagCDState, "fsFiles", append(count255, make([]byte, 255*12)...))
+	if err := NewEmulator().Deserialize(bad); err == nil ||
+		!strings.Contains(err.Error(), "fsFiles") {
+		t.Errorf("hostile fsFiles count error = %v", err)
+	}
+	count2 := binary.BigEndian.AppendUint32(nil, 2)
+	bad = rebuildStateWithField(t, e, tagCDState, "fsFiles", append(count2, make([]byte, 12)...))
+	if err := NewEmulator().Deserialize(bad); err == nil ||
+		!strings.Contains(err.Error(), "fsFiles") {
+		t.Errorf("hostile fsFiles size error = %v", err)
+	}
 }
 
 // TestSerializeBIOSHash verifies the header carries the SHA-256 of the
@@ -762,5 +982,205 @@ func TestSerializeBIOSHash(t *testing.T) {
 	hdr, _ := parseStateForTest(t, data)
 	if want := sha256.Sum256(bios); hdr.biosHash != want {
 		t.Errorf("biosHash mismatch")
+	}
+}
+
+// TestStateRestoresMidCommandDraw stops a VDP1 draw partway through a
+// half-transparent sprite, restores the state into a second emulator,
+// finishes the draw in both, and compares the draw frame buffers. The
+// pixel write parameters of the in-progress command are derived at
+// load, so the restored command must draw its remaining pixels the
+// way the uninterrupted one does.
+// TestStateRestoresMidCommandPosition saves with a half-transparent
+// polygon part way through a connecting line and holds the restored
+// command's list position, which the state derives from the op, equal
+// to the saved one: the entry the restored walk opens must start where
+// the saved walk stopped, or the device would blend the steps before
+// it twice.
+func TestStateRestoresMidCommandPosition(t *testing.T) {
+	e1 := NewEmulator()
+	v := e1.vdp1
+	v.Write(0x00, 0x0000)
+	v.Write(0x02, 0x0000)
+	v.Write(0x04, 0x0002)
+	l := &benchList{v: v}
+	l.add(benchCmd{ctrl: 0x0009, xc: 319, yc: 223})
+	l.add(benchCmd{ctrl: 0x000A})
+	l.add(benchCmd{ctrl: 0x0004, pmod: 3, colr: 0x83E0, xa: 0, ya: 0, xb: 319, yb: 0, xc: 319, yc: 223, xd: 0, yd: 223})
+	l.end()
+	v.VBlankIn()
+	v.VBlankOut()
+	if v.PTM() == 2 && v.ConsumeFBSwap() {
+		v.StartAutoDraw()
+	}
+	v.TickSystemCycles(300)
+	if v.cmdPhase != phaseDraw || v.cmd.op.Kind != draw.OpPolygon || !v.cmd.st.Begun {
+		t.Fatalf("cmdPhase = %d, op kind %d, begun %t, want a polygon inside a line", v.cmdPhase, v.cmd.op.Kind, v.cmd.st.Begun)
+	}
+	wantLine, wantStep := drawPosition(&v.cmd.st)
+	if wantStep == 0 {
+		t.Fatal("the saved walk is at a line's start")
+	}
+
+	state, err := e1.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	e2 := NewEmulator()
+	if err := e2.Deserialize(state); err != nil {
+		t.Fatalf("Deserialize: %v", err)
+	}
+	if line, step := drawPosition(&e2.vdp1.cmd.st); line != wantLine || step != wantStep {
+		t.Fatalf("restored position (%d, %d), saved (%d, %d)", line, step, wantLine, wantStep)
+	}
+	if e2.vdp1.cmdOpen {
+		t.Fatal("the restored command has an open entry before it draws")
+	}
+}
+
+// midSpriteEmulator returns an emulator stopped part way through a
+// half-transparent normal sprite, with a second sprite still to draw.
+func midSpriteEmulator(t *testing.T) *Emulator {
+	t.Helper()
+	e1 := NewEmulator()
+	v := e1.vdp1
+	v.Write(0x00, 0x0000)
+	v.Write(0x02, 0x0000)
+	v.Write(0x04, 0x0002)
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			v.WriteVRAM(benchTex8+uint32(y*32+x), uint8(1+(x*3+y*5)%250))
+		}
+	}
+	l := &benchList{v: v}
+	l.add(benchCmd{ctrl: 0x0009, xc: 319, yc: 223})
+	l.add(benchCmd{ctrl: 0x000A})
+	l.add(benchCmd{pmod: 4<<3 | 3, colr: 0x0100, srca: benchTex8 / 8, size: benchSize32, xa: 40, ya: 40})
+	l.add(benchCmd{pmod: 4<<3 | 0x0400, colr: 0x0100, srca: benchTex8 / 8, size: benchSize32, xa: 100, ya: 40})
+	l.end()
+	for i := 0; i < vdp1FBSize; i += 2 {
+		v.drawFB[i] = 0x80
+		v.drawFB[i+1] = 0x10
+	}
+
+	v.VBlankIn()
+	v.VBlankOut()
+	if v.PTM() == 2 && v.ConsumeFBSwap() {
+		v.StartAutoDraw()
+	}
+	v.TickSystemCycles(200)
+	if v.cmdPhase != phaseDraw || v.cmd.op.Kind != draw.OpNormalSprite {
+		t.Fatalf("cmdPhase = %d, op kind %d, want a normal sprite in progress", v.cmdPhase, v.cmd.op.Kind)
+	}
+	return e1
+}
+
+// TestStateRestoresRecordsPending loads a mid-command state into an
+// emulator whose record buffer already holds ended records, as after
+// a rewind or a load after play, and into a fresh one: the restored
+// command's records are reserved pending at the front either way,
+// since the state carries no records.
+func TestStateRestoresRecordsPending(t *testing.T) {
+	e1 := midSpriteEmulator(t)
+	n := draw.OpRecordWords(&e1.vdp1.cmd.op)
+	if n == 0 {
+		t.Fatal("the sprite in progress has no records")
+	}
+	state, err := e1.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+
+	used := NewEmulator()
+	used.vdp1.ensureRecords(uint64(n) * 4)
+	for i := range used.vdp1.lineRecords {
+		used.vdp1.lineRecords[i] = 7
+	}
+	used.vdp1.recordWords = n * 3
+	for name, e2 := range map[string]*Emulator{"used": used, "fresh": NewEmulator()} {
+		if err := e2.Deserialize(state); err != nil {
+			t.Fatalf("%s: Deserialize: %v", name, err)
+		}
+		v := e2.vdp1
+		if v.cmd.op.RecordBase != 0 || v.recordWords != n {
+			t.Errorf("%s: record base %d, words %d, want 0 and %d", name, v.cmd.op.RecordBase, v.recordWords, n)
+		}
+		for i := uint32(0); i < n; i++ {
+			if got := draw.LoadLineEnd(v.lineRecords, 0, int32(i)); got != draw.LineEndPending {
+				t.Fatalf("%s: record %d = %d, want pending", name, i, got)
+			}
+		}
+	}
+}
+
+// TestStateRestoresListRestarted loads a mid-command state into an
+// emulator whose list holds the entries of its own frame: the list
+// restarts with no open entry, and the ordinals continue from the
+// loading emulator's count, so the restored command's first entry
+// ranks above every entry drawn before the load. A fresh emulator
+// starts the ordinals at zero.
+func TestStateRestoresListRestarted(t *testing.T) {
+	e1 := midSpriteEmulator(t)
+	state, err := e1.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+
+	used := midSpriteEmulator(t)
+	if len(used.vdp1.ops) == 0 {
+		t.Fatal("the loading emulator's list is empty")
+	}
+	pre := used.vdp1.opSeq
+	for name, e2 := range map[string]*Emulator{"used": used, "fresh": NewEmulator()} {
+		if err := e2.Deserialize(state); err != nil {
+			t.Fatalf("%s: Deserialize: %v", name, err)
+		}
+		v := e2.vdp1
+		if len(v.ops) != 0 || v.opsTaken != 0 || v.cmdOpen {
+			t.Fatalf("%s: list after load holds %d entries, %d taken, open %t", name, len(v.ops), v.opsTaken, v.cmdOpen)
+		}
+		want := uint32(0)
+		if name == "used" {
+			want = pre
+		}
+		if v.opSeq != want {
+			t.Fatalf("%s: next ordinal after load %d, want %d", name, v.opSeq, want)
+		}
+		v.TickSystemCycles(200)
+		if len(v.ops) == 0 {
+			t.Fatalf("%s: the resumed walk appended no entry", name)
+		}
+		if v.ops[0].Seq != want {
+			t.Fatalf("%s: first entry after load has ordinal %d, want %d", name, v.ops[0].Seq, want)
+		}
+	}
+}
+
+func TestStateRestoresMidCommandDraw(t *testing.T) {
+	e1 := midSpriteEmulator(t)
+	v := e1.vdp1
+
+	state, err := e1.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	e2 := NewEmulator()
+	if err := e2.Deserialize(state); err != nil {
+		t.Fatalf("Deserialize: %v", err)
+	}
+
+	v.TickSystemCycles(benchVDP1Budget)
+	e2.vdp1.TickSystemCycles(benchVDP1Budget)
+	if e2.vdp1.cmdPhase != phaseIdle || e2.vdp1.drawActive {
+		t.Fatalf("restored draw did not finish")
+	}
+	if !bytes.Equal(v.drawFB, e2.vdp1.drawFB) {
+		diff := 0
+		for i := range v.drawFB {
+			if v.drawFB[i] != e2.vdp1.drawFB[i] {
+				diff++
+			}
+		}
+		t.Fatalf("restored draw differs from the uninterrupted draw in %d bytes", diff)
 	}
 }

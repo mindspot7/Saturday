@@ -191,13 +191,6 @@ func TestVDP2Accessors(t *testing.T) {
 	}
 }
 
-func TestVDP2ActiveSystemCyclesPerLine(t *testing.T) {
-	v := NewVDP2(NewSCU())
-	if v.ActiveSystemCyclesPerLine() != activeSystemCycles320 {
-		t.Errorf("ActiveSystemCyclesPerLine = %d, want %d", v.ActiveSystemCyclesPerLine(), activeSystemCycles320)
-	}
-}
-
 func TestEmulatorSlaveDisabledByDefault(t *testing.T) {
 	e := NewEmulator()
 

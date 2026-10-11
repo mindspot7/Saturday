@@ -1,6 +1,8 @@
 package core
 
-import "testing"
+import (
+	"testing"
+)
 
 // setupSixLayerScene builds a scene with every layer competing on one
 // row, for the composite interaction tests:
@@ -66,8 +68,9 @@ func setupSixLayerScene(t *testing.T) (*VDP2, vdp1FBView) {
 	writeCRAM16Test(v, 23, 0x7C1F) // palette 1 entry 7: magenta
 
 	// Sprite: type 0 (PR bits 15:14), PRISA low = register 0 = 1, PRISB
-	// low = register 2 = 6, CRAM 5 yellow.
-	v.regs[vdp2SPCTL] = 0x0000
+	// low = register 2 = 6, CRAM 5 yellow. SPWINEN is set so the frame
+	// buffer MSB is the sprite window bit NBG3's window reads.
+	v.regs[vdp2SPCTL] = 0x0010
 	v.regs[vdp2PRISA] = 0x0001
 	v.regs[vdp2PRISB] = 0x0006
 	writeCRAM16Test(v, 5, 0x03FF)
@@ -90,20 +93,20 @@ func setupSixLayerScene(t *testing.T) (*VDP2, vdp1FBView) {
 }
 
 var (
-	colYellow  = [3]int{255, 255, 0}
-	colGreen   = [3]int{0, 255, 0}
-	colRed     = [3]int{255, 0, 0}
-	colBlue    = [3]int{0, 0, 255}
-	colWhite   = [3]int{255, 255, 255}
-	colMagenta = [3]int{255, 0, 255}
+	colYellow  = [3]int{248, 248, 0}
+	colGreen   = [3]int{0, 248, 0}
+	colRed     = [3]int{248, 0, 0}
+	colBlue    = [3]int{0, 0, 248}
+	colWhite   = [3]int{248, 248, 248}
+	colMagenta = [3]int{248, 0, 248}
 )
 
 // expectRow asserts the output row y matches the expected colors for x
 // 0..len(want)-1.
-func expectRow(t *testing.T, v *VDP2, y int, want [][3]int, what string) {
+func expectRow(t *testing.T, v *VDP2, swr *softwareRenderer, y int, want [][3]int, what string) {
 	t.Helper()
 	for x, c := range want {
-		expectOut(t, v, x, y, c[0], c[1], c[2], 0, what)
+		expectOut(t, v, swr, x, y, c[0], c[1], c[2], 0, what)
 	}
 }
 
@@ -115,21 +118,23 @@ func expectRow(t *testing.T, v *VDP2, y int, want [][3]int, what string) {
 // sprite window masks it (there NBG1 shows).
 func TestCompositeSixLayersWithWindows(t *testing.T) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.BeginFrame()
+	swr.beginFrame()
 	for y := 0; y < 2; y++ {
-		v.RenderLine(y, fb)
+		v.renderLineTest(swr, y, fb)
 	}
 	v.Write(uint32(vdp2PRINB*2), 0x0703)
 	v.Write(uint32(vdp2PRISB*2), 0x0000)
 	for y := 2; y < 4; y++ {
-		v.RenderLine(y, fb)
+		v.renderLineTest(swr, y, fb)
 	}
 	before := [][3]int{colYellow, colYellow, colBlue, colBlue, colBlue, colGreen, colGreen, colGreen, colMagenta, colMagenta}
-	expectRow(t, v, 0, before, "row 0")
-	expectRow(t, v, 1, before, "row 1")
+	expectRow(t, v, swr, 0, before, "row 0")
+	expectRow(t, v, swr, 1, before, "row 1")
 	after := [][3]int{colRed, colRed, colWhite, colWhite, colWhite, colWhite, colWhite, colWhite, colMagenta, colMagenta}
-	expectRow(t, v, 2, after, "row 2 after the priority writes")
-	expectRow(t, v, 3, after, "row 3")
+	expectRow(t, v, swr, 2, after, "row 2 after the priority writes")
+	expectRow(t, v, swr, 3, after, "row 3")
 }
 
 // TestCompositeSixLayersHiRes verifies the same scene in 640-dot hi-res:
@@ -137,15 +142,16 @@ func TestCompositeSixLayersWithWindows(t *testing.T) {
 // sampled at x/2, and RBG0 advances one map dot per dot pair.
 func TestCompositeSixLayersHiRes(t *testing.T) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x8002 // 640x224
 	v.recalcTiming()
-	renderTestFrameFB(v, fb)
+	renderTestFrameFB(v, swr, fb)
 	// Sprite x 0-3 (frame buffer 0-1), W0 x 0-8, W1 x 4-12. At x 8 the
 	// NBG tiles have ended, NBG0/RBG0 are masked by W0 and NBG1 by W0 AND
 	// W1, leaving the priority-1 sprite (frame buffer x 4). RBG0 spans
 	// x 0-31.
 	want := [][3]int{colYellow, colYellow, colYellow, colYellow, colBlue, colBlue, colBlue, colBlue, colYellow, colMagenta, colMagenta}
-	expectRow(t, v, 0, want, "hi-res row 0")
+	expectRow(t, v, swr, 0, want, "hi-res row 0")
 }
 
 // TestCompositeSixLayersLSMD3 verifies the scene in double-density
@@ -154,16 +160,18 @@ func TestCompositeSixLayersHiRes(t *testing.T) {
 // masked, field 1 line 0 (displayed 1) renders unmasked.
 func TestCompositeSixLayersLSMD3(t *testing.T) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2WPEY0] = 1
 	v.regs[vdp2WPEY1] = 1
 	setLSMD3(v, false)
-	renderTestFrameFB(v, fb)
+	swr.beginFrame() // the frame start where the geometry changed
+	renderTestFrameFB(v, swr, fb)
 	setLSMD3(v, true)
-	renderTestFrameFB(v, fb)
+	renderTestFrameFB(v, swr, fb)
 	masked := [][3]int{colYellow, colYellow, colBlue, colBlue, colBlue, colGreen, colGreen, colGreen, colMagenta, colMagenta}
-	expectRow(t, v, 0, masked, "field 0 line 0 (displayed 0)")
+	expectRow(t, v, swr, 0, masked, "field 0 line 0 (displayed 0)")
 	unmasked := [][3]int{colYellow, colYellow, colGreen, colGreen, colGreen, colGreen, colGreen, colGreen, colMagenta, colMagenta}
-	expectRow(t, v, 1, unmasked, "field 1 line 0 (displayed 1)")
+	expectRow(t, v, swr, 1, unmasked, "field 1 line 0 (displayed 1)")
 }
 
 // TestCompositeCCWindowWithShadow verifies color calculation gated by the
@@ -172,6 +180,7 @@ func TestCompositeSixLayersLSMD3(t *testing.T) {
 // second image, and the shadow halves the blended result.
 func TestCompositeCCWindowWithShadow(t *testing.T) {
 	v := setupTwoNBGLayers(t, 5, 3) // NBG0 green over NBG1 red
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2CCCTL] = 0x0001
 	v.regs[vdp2CCRNA] = 16
 	v.regs[vdp2WPSX0], v.regs[vdp2WPEX0] = 0, 8 // x 0..4
@@ -182,12 +191,12 @@ func TestCompositeCCWindowWithShadow(t *testing.T) {
 	v.regs[vdp2PRISA] = 0x0007
 	fb := vdp1FBView{data: make([]byte, 512*256*2), width: 512, height: 256}
 	setFBPixel16(fb, 6, 0, 0x07FE) // type 0 normal shadow
-	renderTestFrameFB(v, fb)
-	expectOut(t, v, 0, 0, 0, 255, 0, 0, "inside CC window: no blend")
-	expectOut(t, v, 4, 0, 0, 255, 0, 0, "inside CC window: no blend")
-	expectOut(t, v, 5, 0, 135, 119, 0, 2, "outside CC window: blend")
-	expectOut(t, v, 6, 0, 67, 59, 0, 2, "shadow over the blend")
-	expectOut(t, v, 7, 0, 135, 119, 0, 2, "outside CC window: blend")
+	renderTestFrameFB(v, swr, fb)
+	expectOut(t, v, swr, 0, 0, 0, 248, 0, 0, "inside CC window: no blend")
+	expectOut(t, v, swr, 4, 0, 0, 248, 0, 0, "inside CC window: no blend")
+	expectOut(t, v, swr, 5, 0, 131, 116, 0, 2, "outside CC window: blend")
+	expectOut(t, v, swr, 6, 0, 65, 58, 0, 2, "shadow over the blend")
+	expectOut(t, v, swr, 7, 0, 131, 116, 0, 2, "outside CC window: blend")
 }
 
 // TestCompositeBackScreenTableOffsetShadowWindow verifies a per-line back
@@ -195,6 +204,7 @@ func TestCompositeCCWindowWithShadow(t *testing.T) {
 // with a normal shadow sprite darkening the back screen.
 func TestCompositeBackScreenTableOffsetShadowWindow(t *testing.T) {
 	v := setupNBG0FullTile(t) // red tile x 0..7
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BKTAU] = 0x8002
 	v.regs[vdp2BKTAL] = 0xC000 // per-line table at 0x58000
 	for line := uint32(0); line < 8; line++ {
@@ -215,12 +225,12 @@ func TestCompositeBackScreenTableOffsetShadowWindow(t *testing.T) {
 	fb := vdp1FBView{data: make([]byte, 512*256*2), width: 512, height: 256}
 	setFBPixel16(fb, 2, 0, 0x07FE)
 	setFBPixel16(fb, 2, 1, 0x07FE)
-	renderTestFrameFB(v, fb)
-	expectOut(t, v, 0, 0, 10, 0, 255, 0, "line 0 back screen blue + offset")
-	expectOut(t, v, 2, 0, 5, 0, 127, 1, "line 0 shadowed back screen")
-	expectOut(t, v, 0, 1, 10, 255, 0, 0, "line 1 back screen green + offset")
-	expectOut(t, v, 2, 1, 5, 127, 0, 1, "line 1 shadowed back screen")
-	expectOut(t, v, 6, 0, 255, 0, 0, 0, "outside the window: NBG0")
+	renderTestFrameFB(v, swr, fb)
+	expectOut(t, v, swr, 0, 0, 10, 0, 248, 0, "line 0 back screen blue + offset")
+	expectOut(t, v, swr, 2, 0, 5, 0, 124, 1, "line 0 shadowed back screen")
+	expectOut(t, v, swr, 0, 1, 10, 248, 0, 0, "line 1 back screen green + offset")
+	expectOut(t, v, swr, 2, 1, 5, 124, 0, 1, "line 1 shadowed back screen")
+	expectOut(t, v, swr, 6, 0, 248, 0, 0, 0, "outside the window: NBG0")
 }
 
 // TestCompositeSixLayers704 verifies the six-layer scene at 704 dots: the
@@ -228,16 +238,17 @@ func TestCompositeBackScreenTableOffsetShadowWindow(t *testing.T) {
 // as 640, on the wider row.
 func TestCompositeSixLayers704(t *testing.T) {
 	v, fb := setupSixLayerScene(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2TVMD] = 0x8003 // 704x224
 	v.recalcTiming()
 	if v.activeWidth != 704 {
 		t.Fatalf("active width %d, want 704", v.activeWidth)
 	}
-	renderTestFrameFB(v, fb)
+	renderTestFrameFB(v, swr, fb)
 	want := [][3]int{colYellow, colYellow, colYellow, colYellow, colBlue, colBlue, colBlue, colBlue, colYellow, colMagenta, colMagenta}
-	expectRow(t, v, 0, want, "704-dot row 0")
-	expectOut(t, v, 31, 0, 255, 0, 255, 0, "RBG0 dot pairs reach x 31")
-	expectOut(t, v, 32, 0, 0, 0, 0, 0, "past the RBG0 cells")
+	expectRow(t, v, swr, 0, want, "704-dot row 0")
+	expectOut(t, v, swr, 31, 0, 248, 0, 248, 0, "RBG0 dot pairs reach x 31")
+	expectOut(t, v, swr, 32, 0, 0, 0, 0, 0, "past the RBG0 cells")
 }
 
 // TestPAL256LinePixels verifies the composite on a PAL 256-line frame: a
@@ -246,6 +257,7 @@ func TestCompositeSixLayers704(t *testing.T) {
 // layer on those rows.
 func TestPAL256LinePixels(t *testing.T) {
 	v := newTestVDP2()
+	swr := newSoftwareRenderer(v)
 	v.SetPAL(true)
 	v.regs[vdp2TVMD] = 0x8020 // 320x256
 	v.recalcTiming()
@@ -265,11 +277,11 @@ func TestPAL256LinePixels(t *testing.T) {
 	v.regs[vdp2WPSX0], v.regs[vdp2WPEX0] = 0, 640
 	v.regs[vdp2WPSY0], v.regs[vdp2WPEY0] = 240, 255
 	v.regs[vdp2WCTLA] = 0x0002
-	renderTestFrame(v)
-	expectOut(t, v, 0, 239, 0, 255, 0, 0, "line 239: bitmap")
-	expectOut(t, v, 0, 240, 0, 0, 0, 0, "line 240: masked, black back screen")
-	expectOut(t, v, 0, 250, 0, 0, 255, 0, "line 250: masked, blue back screen entry")
-	expectOut(t, v, 0, 255, 0, 0, 0, 0, "line 255: masked")
+	renderTestFrame(v, swr)
+	expectOut(t, v, swr, 0, 239, 0, 248, 0, 0, "line 239: bitmap")
+	expectOut(t, v, swr, 0, 240, 0, 0, 0, 0, "line 240: masked, black back screen")
+	expectOut(t, v, swr, 0, 250, 0, 0, 248, 0, "line 250: masked, blue back screen entry")
+	expectOut(t, v, swr, 0, 255, 0, 0, 0, 0, "line 255: masked")
 }
 
 // setLSMD2 puts the VDP2 into single-density interlace (TVMD LSMD=10).
@@ -296,6 +308,7 @@ func TestLSMD2LineTableIndexHalving(t *testing.T) {
 	}
 
 	v := setupNBG0FullTile(t)
+	swr := newSoftwareRenderer(v)
 	v.regs[vdp2BKTAU] = 0x0002
 	v.regs[vdp2BKTAL] = 0xC000
 	writeVRAM16(v, 0x58000, 0xFC00)
@@ -305,24 +318,25 @@ func TestLSMD2LineTableIndexHalving(t *testing.T) {
 	v.regs[vdp2LWTA0L] = 0x0000
 	writeTable(v)
 	setLSMD2(v)
-	renderTestFrame(v)
-	expectOut(t, v, 2, 0, 0, 0, 255, 0, "lines 0-1 use entry 0: masked")
-	expectOut(t, v, 2, 1, 0, 0, 255, 0, "lines 0-1 use entry 0: masked")
-	expectOut(t, v, 2, 2, 255, 0, 0, 0, "lines 2-3 use entry 1: excluded")
-	expectOut(t, v, 2, 3, 255, 0, 0, 0, "lines 2-3 use entry 1: excluded")
-	expectOut(t, v, 2, 4, 0, 0, 255, 0, "lines 4-5 use entry 2: masked")
+	renderTestFrame(v, swr)
+	expectOut(t, v, swr, 2, 0, 0, 0, 248, 0, "lines 0-1 use entry 0: masked")
+	expectOut(t, v, swr, 2, 1, 0, 0, 248, 0, "lines 0-1 use entry 0: masked")
+	expectOut(t, v, swr, 2, 2, 248, 0, 0, 0, "lines 2-3 use entry 1: excluded")
+	expectOut(t, v, swr, 2, 3, 248, 0, 0, 0, "lines 2-3 use entry 1: excluded")
+	expectOut(t, v, swr, 2, 4, 0, 0, 248, 0, "lines 4-5 use entry 2: masked")
 
 	// Rotation parameter window with the same table: parameter B inside.
 	v = setupRBG0ParamAB(t)
+	swr = newSoftwareRenderer(v)
 	v.regs[vdp2RPMD] = 0x0003
 	v.regs[vdp2WCTLD] = 0x0002
 	v.regs[vdp2LWTA0U] = 0x8002
 	v.regs[vdp2LWTA0L] = 0x0000
 	writeTable(v)
 	setLSMD2(v)
-	buf := make([]uint32, 352*256)
+	buf := make([]uint32, testFrameDots)
 	renderTestRBG0(v, buf)
-	expectRGB(t, v, buf, 2, 1, 0, 255, 0, "RP window lines 0-1: B")
-	expectRGB(t, v, buf, 2, 2, 255, 0, 0, "RP window lines 2-3: A")
-	expectRGB(t, v, buf, 2, 5, 0, 255, 0, "RP window lines 4-5: B")
+	expectRGB(t, v, buf, 2, 1, 0, 248, 0, "RP window lines 0-1: B")
+	expectRGB(t, v, buf, 2, 2, 248, 0, 0, "RP window lines 2-3: A")
+	expectRGB(t, v, buf, 2, 5, 0, 248, 0, "RP window lines 4-5: B")
 }

@@ -55,6 +55,15 @@ func describeVDP1Band(v *VDP1) func(band int) string {
 // an end-coded sprite.
 func goldenVDP1CommandList(t *testing.T) *VDP1 {
 	v := newDrawTestVDP1()
+	writeGoldenVDP1CommandList(v)
+	v.VBlankIn()
+	drainDrawing(v)
+	return v
+}
+
+// writeGoldenVDP1CommandList writes the golden list's textures and
+// commands to v's VRAM.
+func writeGoldenVDP1CommandList(v *VDP1) {
 	grda := writeGouraudTable(v, 0x4210, 0x421F, 0x5E10, 0x4210)
 	// 8x8 256-color texture with an end code (0xFF) at column 6.
 	for y := 0; y < 8; y++ {
@@ -120,9 +129,6 @@ func goldenVDP1CommandList(t *testing.T) *VDP1 {
 	writeCmd16(v, 0x12C, 196)
 	writeCmd16(v, 0x12E, 146)
 	writeDrawEnd(v, 0x140)
-	v.VBlankIn()
-	drainDrawing(v)
-	return v
 }
 
 // TestGoldenVDP1CommandList pins the VDP1 renderer's output for a command
@@ -130,8 +136,8 @@ func goldenVDP1CommandList(t *testing.T) *VDP1 {
 func TestGoldenVDP1CommandList(t *testing.T) {
 	v := goldenVDP1CommandList(t)
 	want := []uint32{
-		0xBCC31DC5, 0xBCC31DC5, 0xFC4B2920, 0x955C1FAB, 0xC8063210, 0x7BABC791, 0xD4D39B58, 0xCBE8B13F,
-		0xAE50B3AF, 0xD429E382, 0x2FBE23B3, 0x6E95B1A7, 0x80771C8E, 0x5D148F60, 0xD1619CA5, 0xD62AA2A9,
+		0xBCC31DC5, 0xBCC31DC5, 0xFC4B2920, 0xD93D2148, 0x84C6284D, 0xF0A151B6, 0xDDB4888B, 0x347CAE21,
+		0x5984A74B, 0x31EF35DA, 0xE001B6FE, 0x96DA7D92, 0x469A7FDE, 0xED3AE621, 0xD1619CA5, 0xD62AA2A9,
 		0x6375BE05, 0x23C13F09, 0xCDBBDDBD, 0xBFA39A7D, 0x8BB59A39, 0xA62103C9, 0xF00EBAD9, 0x8BFA5875,
 		0xFCDE2DC9, 0xFF381119, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5, 0xBCC31DC5,
 	}
