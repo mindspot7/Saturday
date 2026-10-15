@@ -59,17 +59,29 @@ func (e *Emulator) ReadMemory(addr uint32, buf []byte) uint32 {
 
 // WriteMemory writes data to guest RAM at a canonical native bus
 // address and returns the number of bytes written. Bytes go through
-// the bus decode, matching ReadMemory. Writes clamp at the region end;
-// addresses outside the canonical regions write nothing.
+// the bus decode, matching ReadMemory, and reach the master SH-2's
+// cache as its own store would (externalWrite8). Writes clamp at the
+// region end; addresses outside the canonical regions write nothing.
 func (e *Emulator) WriteMemory(addr uint32, data []byte) uint32 {
 	n, ok := busClamp(addr, uint32(len(data)))
 	if !ok {
 		return 0
 	}
 	for i := uint32(0); i < n; i++ {
-		e.bus.write8Impl(addr+i, data[i])
+		e.externalWrite8(addr+i, data[i])
 	}
 	return n
+}
+
+// externalWrite8 writes one byte of guest RAM as a store by the master
+// SH-2 would: memory through the bus decode, and the master's cache line
+// when one holds the address (write-through write hit; nothing is
+// allocated). The slave's cache is not updated, as on hardware, where
+// neither CPU snoops the other's stores. Calls happen between frames
+// with the emulation threads parked.
+func (e *Emulator) externalWrite8(addr uint32, val uint8) {
+	e.bus.write8Impl(addr, val)
+	e.master.CacheStoreHit8(addr, val)
 }
 
 // ReadMemoryFlat reads from the Saturn flat memory convention into buf
@@ -99,16 +111,16 @@ func (e *Emulator) ReadMemoryFlat(off uint32, buf []byte) uint32 {
 // WriteMemoryFlat writes data to the Saturn flat memory convention and
 // returns the number of bytes written, matching ReadMemoryFlat's
 // layout and boundary behavior. The switch maps flat offsets to native
-// addresses only; the bus decode selects every byte.
+// addresses only; each byte is written as WriteMemory writes it.
 func (e *Emulator) WriteMemoryFlat(off uint32, data []byte) uint32 {
 	var n uint32
 	for i := range data {
 		cur := off + uint32(i)
 		switch {
 		case cur < wramLSize:
-			e.bus.write8Impl(0x00200000+cur, data[i])
+			e.externalWrite8(0x00200000+cur, data[i])
 		case cur < wramLSize+wramHSize:
-			e.bus.write8Impl(0x06000000+(cur-wramLSize), data[i])
+			e.externalWrite8(0x06000000+(cur-wramLSize), data[i])
 		default:
 			return n
 		}

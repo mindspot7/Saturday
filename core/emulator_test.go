@@ -485,3 +485,34 @@ func TestWriteMemoryFlat(t *testing.T) {
 		t.Fatalf("out-of-range: n=%d, want 0", n)
 	}
 }
+
+// TestWriteMemoryReachesMasterCache pins external writes to a store by
+// the master SH-2: a line the master has cached is updated, so the master
+// reads the new value; the slave's cached copy stays stale, as on
+// hardware where neither CPU snoops the other's stores.
+func TestWriteMemoryReachesMasterCache(t *testing.T) {
+	const ccrCE = 0x01
+	e := NewEmulator()
+	e.master.SetCCR(ccrCE)
+	e.slave.SetCCR(ccrCE)
+
+	e.bus.wramH[0x1000] = 0x11
+	e.bus.wramH[0x1001] = 0x22
+	if e.master.Read8(0x06001000) != 0x11 || e.slave.Read8(0x06001000) != 0x11 {
+		t.Fatal("line fill read wrong value")
+	}
+
+	e.WriteMemory(0x06001000, []byte{0xAB})
+	if got := e.master.Read8(0x06001000); got != 0xAB {
+		t.Errorf("master read after WriteMemory = %#x, want 0xab", got)
+	}
+	if got := e.slave.Read8(0x06001000); got != 0x11 {
+		t.Errorf("slave read after WriteMemory = %#x, want stale 0x11", got)
+	}
+
+	// Flat offset 0x101001 is Work RAM-H 0x06001001
+	e.WriteMemoryFlat(0x101001, []byte{0xCD})
+	if got := e.master.Read8(0x06001001); got != 0xCD {
+		t.Errorf("master read after WriteMemoryFlat = %#x, want 0xcd", got)
+	}
+}

@@ -444,3 +444,64 @@ func (c *CPU) testCacheValid(way, entry int) bool {
 func (c *CPU) testCacheTag(way, entry int) uint32 {
 	return c.cacheTags[entry][way] &^ cacheValidBit
 }
+
+// TestCacheStoreHitUpdatesResidentLine: an external store applied as this
+// CPU's own store updates a cached line, so a later read hits the new
+// value instead of the stale one. The memory write is the caller's.
+func TestCacheStoreHitUpdatesResidentLine(t *testing.T) {
+	cpu, bus := cacheFixture(t, 0, 0, 0)
+
+	bus.Write32(0x100, 0x11223344)
+	cpu.Read32(0x100) // fill the line
+
+	bus.Write8(0x101, 0xAB)
+	cpu.CacheStoreHit8(0x101, 0xAB)
+
+	if got := cpu.Read8(0x101); got != 0xAB {
+		t.Errorf("read after store hit = %02X, want AB", got)
+	}
+	if got := cpu.Read32(0x100); got != 0x11AB3344 {
+		t.Errorf("line after store hit = %08X, want 11AB3344", got)
+	}
+}
+
+// TestCacheStoreHitNoAllocate: a store to an address with no resident
+// line allocates nothing (write-through, no write allocation), so a later
+// read misses and fills from memory.
+func TestCacheStoreHitNoAllocate(t *testing.T) {
+	cpu, bus := cacheFixture(t, 0, 0, 0)
+
+	bus.Write8(0x200, 0x5A)
+	cpu.CacheStoreHit8(0x200, 0x5A)
+
+	if _, hit := cpu.cacheLookup(0x200); hit {
+		t.Fatal("store hit allocated a line")
+	}
+	if got := cpu.Read8(0x200); got != 0x5A {
+		t.Errorf("read = %02X, want 5A from memory", got)
+	}
+}
+
+// TestCacheStoreHitIgnored: with the cache disabled, or for an address
+// outside the cache area (cache-through partition), the cached data is
+// left unchanged.
+func TestCacheStoreHitIgnored(t *testing.T) {
+	cpu, bus := cacheFixture(t, 0, 0, 0)
+
+	bus.Write32(0x100, 0x11223344)
+	cpu.Read32(0x100) // fill the line
+
+	// Cache-through mirror of the same address
+	cpu.CacheStoreHit8(0x20000101, 0xAB)
+	if got := cpu.Read8(0x101); got != 0x22 {
+		t.Errorf("cache-through store changed cached byte to %02X, want 22", got)
+	}
+
+	// Cache disabled
+	cpu.SetCCR(0)
+	cpu.CacheStoreHit8(0x101, 0xCD)
+	cpu.SetCCR(ccrCE)
+	if got := cpu.Read8(0x101); got != 0x22 {
+		t.Errorf("store with cache disabled changed cached byte to %02X, want 22", got)
+	}
+}

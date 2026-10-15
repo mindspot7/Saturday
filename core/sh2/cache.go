@@ -273,6 +273,18 @@ func (c *CPU) cacheWriteHit32(addr uint32, val uint32) {
 	}
 }
 
+// CacheStoreHit8 applies a byte store at addr to this CPU's cache as the
+// CPU's own store would: in the cache area with the cache enabled, a
+// resident line holding addr is updated (write hit, Section 8.4.2) and
+// nothing is allocated. It does not write memory; the caller does. Used
+// for external memory writes that stand in for a store by this CPU. Must
+// be called with the CPU's thread parked, between instructions.
+func (c *CPU) CacheStoreHit8(addr uint32, val uint8) {
+	if addr>>29 == 0 && c.ccr&ccrCE != 0 {
+		c.cacheWriteHit8(addr, val)
+	}
+}
+
 // cachePurge clears all valid bits and all LRU information (Section
 // 8.4.6). Tags and data are not touched - only validity. Triggered by
 // writing 1 to CCR's CP bit.
