@@ -14,8 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/audio"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/mobile"
 	"github.com/user-none/eblitui/romloader"
@@ -42,14 +44,107 @@ const (
 	buttonStart
 )
 
+var (
+	audioContextOnce sync.Once
+	audioContext     *audio.Context
+	audioContextErr  error
+)
+
 var session struct {
 	sync.Mutex
-	emu       *core.Emulator
-	disc      *romloader.Disc
-	bios      []byte
-	buttons   uint32
-	status    string
-	started   bool
+	emu         *core.Emulator
+	disc        *romloader.Disc
+	bios        []byte
+	buttons     uint32
+	status      string
+	started     bool
+	audioStream *pcmRing
+	audioPlayer *audio.Player
+}
+
+// pcmRing is a bounded, non-blocking producer/consumer queue for interleaved
+// 44.1 kHz stereo signed-16-bit PCM. If emulation runs ahead, old audio is
+// dropped rather than blocking the video/game loop. If audio runs ahead, Read
+// fills the remainder with silence to keep the audio device clock moving.
+type pcmRing struct {
+	mu    sync.Mutex
+	data  []byte
+	read  int
+	write int
+	size  int
+}
+
+func newPCMRing() *pcmRing {
+	// Two seconds of stereo 16-bit PCM.
+	return &pcmRing{data: make([]byte, 44100*4*2)}
+}
+
+func (r *pcmRing) Push(samples []int16) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, sample := range samples {
+		value := uint16(sample)
+		for _, b := range []byte{byte(value), byte(value >> 8)} {
+			if r.size == len(r.data) {
+				r.read = (r.read + 1) % len(r.data)
+				r.size--
+			}
+			r.data[r.write] = b
+			r.write = (r.write + 1) % len(r.data)
+			r.size++
+		}
+	}
+}
+
+func (r *pcmRing) Read(dst []byte) (int, error) {
+	clear(dst)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(dst)
+	if n > r.size {
+		n = r.size
+	}
+	first := n
+	if first > len(r.data)-r.read {
+		first = len(r.data) - r.read
+	}
+	copy(dst[:first], r.data[r.read:r.read+first])
+	if first < n {
+		copy(dst[first:n], r.data[:n-first])
+	}
+	r.read = (r.read + n) % len(r.data)
+	r.size -= n
+	return len(dst), nil
+}
+
+func ensureAudioLocked() {
+	if session.audioPlayer != nil {
+		return
+	}
+	audioContextOnce.Do(func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				audioContextErr = fmt.Errorf("audio initialization panic: %v", recovered)
+			}
+		}()
+		audioContext = audio.NewContext(44100)
+	})
+	if audioContextErr != nil || audioContext == nil {
+		if audioContextErr != nil {
+			session.status = "Audio unavailable: " + audioContextErr.Error()
+		}
+		return
+	}
+	session.audioStream = newPCMRing()
+	player, err := audioContext.NewPlayer(session.audioStream)
+	if err != nil {
+		session.audioStream = nil
+		session.status = "Audio unavailable: " + err.Error()
+		return
+	}
+	player.SetBufferSize(100 * time.Millisecond)
+	player.Play()
+	session.audioPlayer = player
 }
 
 // Dummy is exported so ebitenmobile can generate Java bindings for this package.
@@ -160,8 +255,12 @@ func (g *shell) Update() error {
 	session.Lock()
 	defer session.Unlock()
 	if session.emu != nil && session.started {
+		ensureAudioLocked()
 		session.emu.SetInput(0, session.buttons)
 		session.emu.RunFrame()
+		if session.audioStream != nil {
+			session.audioStream.Push(session.emu.GetAudioSamples())
+		}
 	}
 	return nil
 }
