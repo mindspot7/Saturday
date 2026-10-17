@@ -214,16 +214,19 @@ public final class MainActivity extends Activity {
             case KeyEvent.KEYCODE_DPAD_DOWN: return 1;
             case KeyEvent.KEYCODE_DPAD_LEFT: return 2;
             case KeyEvent.KEYCODE_DPAD_RIGHT: return 3;
-            case KeyEvent.KEYCODE_BUTTON_A:
-            case KeyEvent.KEYCODE_Z: return 4;
-            case KeyEvent.KEYCODE_BUTTON_B:
-            case KeyEvent.KEYCODE_X: return 5;
-            case KeyEvent.KEYCODE_BUTTON_X:
-            case KeyEvent.KEYCODE_C: return 6;
-            case KeyEvent.KEYCODE_BUTTON_Y:
-            case KeyEvent.KEYCODE_V: return 7;
-            case KeyEvent.KEYCODE_BUTTON_L1: return 10;
-            case KeyEvent.KEYCODE_BUTTON_R1: return 11;
+            // Standard Android gamepad face buttons.
+            case KeyEvent.KEYCODE_BUTTON_A: return 4; // Saturn A
+            case KeyEvent.KEYCODE_BUTTON_B: return 5; // Saturn B
+            case KeyEvent.KEYCODE_BUTTON_X: return 7; // Saturn X
+            case KeyEvent.KEYCODE_BUTTON_Y: return 8; // Saturn Y
+            // Extra numbered buttons cover six-button controllers that
+            // expose their additional face buttons through Android's generic IDs.
+            case KeyEvent.KEYCODE_BUTTON_1: return 6; // Saturn C
+            case KeyEvent.KEYCODE_BUTTON_2: return 9; // Saturn Z
+            case KeyEvent.KEYCODE_BUTTON_L1:
+            case KeyEvent.KEYCODE_BUTTON_L2: return 10; // Saturn L
+            case KeyEvent.KEYCODE_BUTTON_R1:
+            case KeyEvent.KEYCODE_BUTTON_R2: return 11; // Saturn R
             case KeyEvent.KEYCODE_BUTTON_START:
             case KeyEvent.KEYCODE_ENTER: return 12;
             default: return -1;
