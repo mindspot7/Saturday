@@ -407,11 +407,14 @@ func (e *Emulator) SetInput(player int, buttons uint32) {
 	e.smpc.SetPadData(player, uint16(b1)<<8|uint16(b2))
 }
 
-// DebugCPUState returns the master SH-2 program counter and status register.
-// It is intended for frontends to diagnose a game that appears stuck at boot.
-func (e *Emulator) DebugCPUState() (pc uint32, sr uint32) {
-	r := e.master.Registers()
-	return r.PC, r.SR
+// DebugMasterPC returns the master SH-2 program counter for frontend diagnostics.
+func (e *Emulator) DebugMasterPC() uint32 {
+	return e.master.Registers().PC
+}
+
+// DebugMasterSR returns the master SH-2 status register for frontend diagnostics.
+func (e *Emulator) DebugMasterSR() uint32 {
+	return e.master.Registers().SR
 }
 
 // GetAudioSamples returns the audio sample buffer for the current frame.
