@@ -7,7 +7,7 @@ Saturday is an Android handheld port of the erings Sega Saturn emulator, targeti
 - Native Android app with fullscreen gameplay.
 - Physical gamepad/controller input; no virtual on-screen controls.
 - User-selected Saturn disc images in CHD or CUE/BIN format.
-- Optional user-provided Saturn BIOS; no BIOS or game images are included.
+- Built-in HLE BIOS is selected automatically when no external BIOS is loaded; an external Saturn BIOS remains optional for compatibility. No BIOS or game images are included.
 - Ebitengine-based presentation and audio output.
 
 ## Build
