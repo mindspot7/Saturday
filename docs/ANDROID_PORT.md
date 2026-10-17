@@ -32,7 +32,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 
 `.github/workflows/android-core.yml` cross-compiles `./core` and `./adapter` for Android ARM64 using the Android NDK and cgo.
 
-The first attempt failed because `CGO_ENABLED=0` is incompatible with the `purego` Android dynamic-loader bridge (`cgo.Dlopen`, `cgo.Dlsym`, and `cgo.Dlclose` were undefined). The workflow was updated to enable cgo and use the NDK's `aarch64-linux-android24-clang` compiler. The corrected workflow still needs a completed run before Android compilation can be marked as passing.
+The initial attempt failed because `CGO_ENABLED=0` was incompatible with `purego`'s Android dynamic-loader bridge. The second attempt enabled cgo but failed before compilation: `android-actions/setup-android@v3` tried to install the removed legacy SDK package `tools`. The workflow now uses the Android SDK already installed on the GitHub-hosted Ubuntu runner, accepts SDK licenses, and installs the pinned NDK directly. This updated workflow must still complete successfully before Android compilation can be marked as passing.
 
 See [workflow runs](https://github.com/mindspot7/Saturday/actions/workflows/android-core.yml).
 
@@ -47,7 +47,8 @@ See [workflow runs](https://github.com/mindspot7/Saturday/actions/workflows/andr
 ## Current status
 
 - [x] Add Android ARM64 core/adapter compile workflow.
-- [x] Identify and correct the first workflow's cgo configuration error.
+- [x] Identify the initial cgo configuration error.
+- [x] Replace the failing legacy SDK setup action with direct SDK/NDK setup.
 - [ ] Confirm the corrected workflow passes.
 - [ ] Implement the Ebitengine mobile entry point and Android host project.
 - [ ] Build and install a debug APK.
