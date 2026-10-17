@@ -24,7 +24,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 
 - Android UI-to-Go binding names and the full AAR/APK build must pass CI before the native frontend is considered build-verified.
 - CHD and CUE/BIN loading is implemented but not yet tested with actual user content on an Android device.
-- Audio output is not wired into the mobile frontend yet.
+- The mobile frontend now feeds the core's interleaved 44.1 kHz stereo PCM into Ebitengine audio through a bounded ring buffer. If emulation gets ahead, old samples are dropped rather than blocking the frame loop; if the audio reader gets ahead, silence fills the gap. Audible output, latency, lifecycle behavior, and sustained synchronization still require physical-device testing.
 - Save states, persistent game-library metadata, BIOS management UI, pause/menu actions, controller remapping, and Android-specific graphics acceleration are not yet implemented.
 - There is no physical-device smoke test yet. A successful compile is not evidence of playable performance.
 
