@@ -263,7 +263,11 @@ func GetStatus() string {
 	return session.status
 }
 
-type shell struct{}
+type shell struct {
+	frameImage *ebiten.Image
+	frameWidth int
+	frameHeight int
+}
 
 func (g *shell) Update() error {
 	session.Lock()
@@ -290,18 +294,39 @@ func (g *shell) Draw(screen *ebiten.Image) {
 		height := session.emu.GetActiveHeight()
 		width := stride / 4
 		if width > 0 && height > 0 && len(pixels) >= stride*height {
-			// WritePixels expects tightly packed RGBA. Saturn framebuffer
-			// rows are tightly packed today; retain a safe row-copy path in
-			// case the renderer's stride differs from width*4.
+			// The Ebitengine screen uses the device's logical size, not the
+			// Saturn framebuffer size. Upload to a correctly sized offscreen
+			// image first, then scale it to fit the screen while preserving 4:3.
+			if g.frameImage == nil || g.frameWidth != width || g.frameHeight != height {
+				if g.frameImage != nil {
+					g.frameImage.Dispose()
+				}
+				g.frameImage = ebiten.NewImage(width, height)
+				g.frameWidth, g.frameHeight = width, height
+			}
 			if stride == width*4 {
-				screen.WritePixels(pixels[:stride*height])
+				g.frameImage.WritePixels(pixels[:width*height*4])
 			} else {
 				tight := make([]byte, width*height*4)
 				for y := 0; y < height; y++ {
 					copy(tight[y*width*4:(y+1)*width*4], pixels[y*stride:y*stride+width*4])
 				}
-				screen.WritePixels(tight)
+				g.frameImage.WritePixels(tight)
 			}
+			bounds := screen.Bounds()
+			scaleX := float64(bounds.Dx()) / float64(width)
+			scaleY := float64(bounds.Dy()) / float64(height)
+			scale := scaleX
+			if scaleY < scale {
+				scale = scaleY
+			}
+			drawOpts := &ebiten.DrawImageOptions{}
+			drawOpts.GeoM.Scale(scale, scale)
+			drawOpts.GeoM.Translate(
+				(float64(bounds.Dx())-float64(width)*scale)/2,
+				(float64(bounds.Dy())-float64(height)*scale)/2,
+			)
+			screen.DrawImage(g.frameImage, drawOpts)
 			return
 		}
 	}
@@ -309,7 +334,7 @@ func (g *shell) Draw(screen *ebiten.Image) {
 	if status == "" {
 		status = "Ready. Select a Saturn disc to begin."
 	}
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("SATURDAY\n\nSega Saturn emulator\n\n%s\n\nSupports CHD and CUE/BIN", status))
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("SATURDAY\\n\\nSega Saturn emulator\\n\\n%s\\n\\nSupports CHD and CUE/BIN", status))
 }
 
 func (g *shell) Layout(outsideWidth, outsideHeight int) (int, int) {
