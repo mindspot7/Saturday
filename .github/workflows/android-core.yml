@@ -32,11 +32,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # Use the SDK preinstalled on GitHub's Ubuntu runner. setup-android
+      # currently attempts to install the removed legacy "tools" package.
       - name: Install Android NDK
-        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+        run: |
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
 
       # purego uses cgo's dynamic-loader bridge on Android, so CGO_ENABLED=0
       # is not a valid Android smoke test for this dependency graph. Use the
