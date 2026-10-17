@@ -1,0 +1,61 @@
+name: Android mobile binding
+
+on:
+  push:
+    branches: [main, android-port]
+  pull_request:
+    branches: [main, android-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bind-android:
+    name: Build Ebitengine Android AAR
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: 27.2.12479018
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android NDK
+        run: |
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Ebitengine mobile binding tool
+        run: go install github.com/hajimehoshi/ebiten/v2/cmd/ebitenmobile@v2.10.5
+
+      - name: Generate Android library
+        run: |
+          "$(go env GOPATH)/bin/ebitenmobile" bind \
+            -target android \
+            -javapkg org.saturday.emulator \
+            -o saturday.aar \
+            ./mobile
+          test -s saturday.aar
+
+      - name: Upload Android library artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: saturday-android-aar
+          path: saturday.aar
+          if-no-files-found: error
+          retention-days: 14
