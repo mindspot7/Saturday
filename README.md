@@ -1,145 +1,32 @@
-# erings
+# Saturday — Android port
 
-A Sega Saturn emulator.
+Saturday is an Android handheld port of the erings Sega Saturn emulator, targeting devices such as AYN Odin and Retroid. The Android frontend is being developed in this branch.
 
-erings is a work in progress. Pretty much all of the console's major internal
-hardware components are implemented to some extent. Many games run and a number
-of them at full speed. However, there are still plenty bugs to find.
+## Android frontend
 
-The focus of erings is to play the majority of officially licensed games while
-focusing on the user experience. This is not intended to be a perfect emulator
-of every aspect of the Saturn. Some features and components are purposely not
-supported and never will be. It might be better to think of this as
-a Saturn game player than a digital Saturn console.
+- Native Android app with fullscreen gameplay.
+- Physical gamepad/controller input; no virtual on-screen controls.
+- User-selected Saturn disc images in CHD or CUE/BIN format.
+- Optional user-provided Saturn BIOS; no BIOS or game images are included.
+- Ebitengine-based presentation and audio output.
 
-This is a gaming first emulator and not intended as game development tool.
-You won't find an integrated debugger you can step through. You won't find
-any kind of editor. The only development tools are intended for helping debug
-the emulator itself.
+## Build
 
-What you will find is a clean UI allowing you organize and play games. With
-a controller first navigation system. Make erings full screen, sit back and
-have fun playing some amazing classic games.
+The Android project is in `android/`. Automated Android builds are defined in:
 
-## Screenshots
+- `.github/workflows/android-core.yml` — cross-compiles the emulator core for Android ARM64.
+- `.github/workflows/android-mobile-bind.yml` — generates the Ebitengine Android binding, builds a debug APK, and uploads the APK/AAR artifact.
 
-<table>
-  <tr>
-    <td align="center"><img src="screenshots/ui_library_icon.webp" width="270"><br>Library (icon)</td>
-    <td align="center"><img src="screenshots/ui_library_list.webp" width="270"><br>Library (list)</td>
-    <td align="center"><img src="screenshots/ui_details.webp" width="270"><br>Game details</td>
-  </tr>
-  <tr>
-    <td align="center"><img src="screenshots/bulk_slash_4x.webp" width="270"><br>Bulk Slash (4x)</td>
-    <td align="center"><img src="screenshots/panzer_dragoon_zwei_4x.webp" width="270"><br>Panzer Dragoon Zwei (4x)</td>
-    <td align="center"><img src="screenshots/waku_waku_7.webp" width="270"><br>Waku Waku 7</td>
-  </tr>
-</table>
-
-## Current State and Major Features
-
-- Runs through the eblitui desktop UI
-- RetroAchievements
-- RuMbLe support for various games
-- NTSC and PAL regions
-- A 4MB extended RAM cartridge
-- Two player digital controllers with per controller configuration profiles
-- Internal backup RAM (console saves) persists between sessions
-- Save states
-- MPEG card
-- Internal resolution upscaling
-
-BIOS region patching is supported. Meaning you can use a US BIOS to play
-Japanese games or a Japanese BIOS to play US games. Or just use the HLE BIOS
-and not worry about it.
+See [docs/ANDROID_PORT.md](docs/ANDROID_PORT.md) for implementation details, known limitations, and build instructions.
 
 ## Rendering
 
-Frames are rendered on the host GPU by default. The VDP1 and VDP2 pixel
-pipelines are written once and run either as ordinary Go on the CPU or as
-compute shaders on the GPU, so both renderers produce the same output. The
-GPU backend is selected by platform.
+The core includes CPU software rendering and GPU-rendering infrastructure for other host platforms. The Android frontend currently consumes the core framebuffer and presents it through Ebitengine. Android-specific GPU acceleration is not yet implemented or verified.
 
-| Platform | Backend |
-|----------|---------|
-| macOS | Metal |
-| Windows | Direct3D 12 |
-| Linux | Vulkan 1.3 |
+## Disc images and BIOS
 
-The GPU renderer needs a hardware device. Software implementations of a
-GPU (such as WARP or lavapipe) are not used. When no usable device is
-found, or the device fails while a game is running, rendering falls back
-to the CPU software renderer for the rest of the session.
+Supported disc formats in the Android frontend are CHD and CUE with their referenced BIN tracks. A Saturn BIOS is optional where the core's HLE boot path supports the game. Source your own BIOS and game images; neither is distributed in this repository.
 
-The internal resolution option renders at a multiple of the Saturn's
-native resolution (1x through 16x) on either renderer. Higher scales cost
-more memory and render time.
+## Project status
 
-## Disc formats
-
-Several disc image formats are supported
-
-- chd
-- cue (tracks must have .bin extension)
-
-## BIOS
-
-A Saturn BIOS image (USA or Japan) is optional. Without one, a built-in
-HLE (high-level emulation) BIOS boots the game. A real BIOS is not
-included with the emulator and needs to be user sourced.
-
-## Building
-
-Build the desktop binary with make: `make`. This provides a binary that
-can be run locally on the command line. This produces a debug build.
-Release builds are created when building OS packages.
-
-### Packages
-
-Proper OS specific packages can be built using make targets.
-
-- `windows`
-- `macos`
-- `appimage`
-
-All builds are put into the `./build` directory.
-
-## UI Controls
-
-Game controls (D-pad, buttons) are configured in the UI's input settings.
-
-| Key | Action |
-|-----|--------|
-| Escape | Open / close the pause menu (also Select on a gamepad) |
-| Tab | Toggle the achievement overlay |
-| ~ | Performance metrics overlay |
-| R (hold) | Rewind while held |
-| F1 | Save state to the current slot |
-| F2 | Next save state slot |
-| Shift + F2 | Previous save state slot |
-| F3 | Load state from the current slot |
-| F4 | Cycle turbo speed (Off, 2x, 3x) |
-| F11 | Toggle fullscreen |
-| F12 | Screenshot |
-
-## Won't be Supported
-
-- ROM cartridges
-- HDTV mode (TVM=100)
-- 31 kHz exclusive monitor mode
-- Peripherals (light gun, mouse, racing wheel, keyboard, etc.)
-
-## Planned
-
-- Disc swapping for multi-disc games
-  - Right now you have to rely on the game saving, exiting the game
-    and selecting the next game from the ui
-- Various graphical enhancements
-- Possible performance enhancements
-- Bug fixes
-- Better game compatibility
-
-## Game Compatibility
-
-Compatibility is not formally tracked yet. Some games play, some
-don't. Some play well, some don't.
+This port is a work in progress. Successful compilation does not guarantee that a game boots, renders correctly, produces audio, or runs at full speed on a physical device. Real-device testing is still required.
