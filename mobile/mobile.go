@@ -314,17 +314,20 @@ func (g *shell) Draw(screen *ebiten.Image) {
 				g.frameImage.WritePixels(tight)
 			}
 			bounds := screen.Bounds()
-			scaleX := float64(bounds.Dx()) / float64(width)
-			scaleY := float64(bounds.Dy()) / float64(height)
-			scale := scaleX
-			if scaleY < scale {
-				scale = scaleY
+			// Saturn's active picture is 4:3; many native framebuffer modes
+			// use 320x224 or 352x240 pixels, so scale X/Y independently to
+			// correct the pixel aspect while fitting the largest centered 4:3 area.
+			targetW := float64(bounds.Dx())
+			targetH := targetW * 3.0 / 4.0
+			if targetH > float64(bounds.Dy()) {
+				targetH = float64(bounds.Dy())
+				targetW = targetH * 4.0 / 3.0
 			}
 			drawOpts := &ebiten.DrawImageOptions{}
-			drawOpts.GeoM.Scale(scale, scale)
+			drawOpts.GeoM.Scale(targetW/float64(width), targetH/float64(height))
 			drawOpts.GeoM.Translate(
-				(float64(bounds.Dx())-float64(width)*scale)/2,
-				(float64(bounds.Dy())-float64(height)*scale)/2,
+				(float64(bounds.Dx())-targetW)/2,
+				(float64(bounds.Dy())-targetH)/2,
 			)
 			screen.DrawImage(g.frameImage, drawOpts)
 			return
