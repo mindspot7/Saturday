@@ -17,20 +17,24 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - The existing desktop build workflow and Makefile package desktop platforms only.
 - `core/renderer_software.go` provides a CPU renderer. This is the initial compatibility baseline, but performance must be measured on real devices.
 - The host GPU backend is platform-specific. Android GPU support must be validated independently; do not assume the Linux Vulkan backend is a drop-in Android backend.
-- The project already depends on Ebitengine. Its mobile route uses the `ebitenmobile` binding tool plus a native Android project; a successful Go cross-compile alone does not produce an installable APK.
+- The project already depends on Ebitengine and gomobile-related packages. A mobile app still needs a dedicated Ebitengine mobile entry point and native Android project; a Go cross-compile alone does not produce an installable APK.
 
 ## Implementation milestones
 
-1. **Android build path (in progress):** keep the desktop entry point unchanged; validate the core's Android ARM64 compilation; then add an Ebitengine mobile package and Android project shell.
+1. **Android build path (in progress):** validate the core's Android ARM64 compilation; then add an Ebitengine mobile package and Android project shell without changing the desktop entry point.
 2. **Controller-first frontend:** use Android's physical gamepad input; do not render virtual buttons. Handle d-pad, face buttons, shoulders/triggers, Start/Select, pause/resume, and controller disconnect/reconnect.
 3. **Display and lifecycle:** landscape/fullscreen gameplay, correct aspect ratio, frame pacing, Android pause/resume and audio lifecycle.
-4. **Content and persistence:** select CHD/CUE disc images and BIOS from Android's document picker; keep save data and save states in app-private storage with an export-friendly path. Confirm whether the existing disc readers can consume Android content URIs directly or need a seekable-file/cache layer.
+4. **Content and persistence:** select CHD/CUE disc images and BIOS from Android's document picker; keep save data and save states in app-private storage with an export-friendly path. Confirm whether existing disc readers can consume Android content URIs directly or need a seekable-file/cache layer.
 5. **Graphics and performance:** establish a working software-rendered baseline, benchmark representative games on handheld hardware, then enable and validate an Android-capable GPU backend if practical.
 6. **CI and release:** build a debug APK in GitHub Actions, publish it as a workflow artifact, and document installation and known limitations.
 
-## Current automated check
+## Automated Android compile check
 
-`.github/workflows/android-core.yml` cross-compiles `./core` and `./adapter` with `GOOS=android`, `GOARCH=arm64`, and `CGO_ENABLED=0`. This is intentionally only a smoke test for Go package compatibility; it is not an APK build or a runtime test. Check the [workflow runs](https://github.com/mindspot7/Saturday/actions/workflows/android-core.yml) for the latest result.
+`.github/workflows/android-core.yml` cross-compiles `./core` and `./adapter` for Android ARM64 using the Android NDK and cgo.
+
+The first attempt failed because `CGO_ENABLED=0` is incompatible with the `purego` Android dynamic-loader bridge (`cgo.Dlopen`, `cgo.Dlsym`, and `cgo.Dlclose` were undefined). The workflow was updated to enable cgo and use the NDK's `aarch64-linux-android24-clang` compiler. The corrected workflow still needs a completed run before Android compilation can be marked as passing.
+
+See [workflow runs](https://github.com/mindspot7/Saturday/actions/workflows/android-core.yml).
 
 ## Acceptance checks
 
@@ -42,8 +46,9 @@ This document tracks the Android handheld port of erings (Saturday fork).
 
 ## Current status
 
-- [x] Android ARM64 core/adapter compile workflow added.
-- [ ] Confirm the first workflow run passes.
+- [x] Add Android ARM64 core/adapter compile workflow.
+- [x] Identify and correct the first workflow's cgo configuration error.
+- [ ] Confirm the corrected workflow passes.
 - [ ] Implement the Ebitengine mobile entry point and Android host project.
 - [ ] Build and install a debug APK.
 - [ ] Implement disc/BIOS selection and persistence.
