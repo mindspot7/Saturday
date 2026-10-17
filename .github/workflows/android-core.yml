@@ -14,6 +14,8 @@ jobs:
   compile-android-core:
     name: Compile emulator core for Android arm64
     runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: 27.2.12479018
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -24,12 +26,27 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # This is a cross-compilation smoke test for the reusable core, not
-      # an APK build. The Android app entry point and device integration
-      # are separate milestones.
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
+
+      # purego uses cgo's dynamic-loader bridge on Android, so CGO_ENABLED=0
+      # is not a valid Android smoke test for this dependency graph. Use the
+      # NDK's target compiler to check the actual Android ARM64 build path.
       - name: Compile core and adapter for Android arm64
         env:
           GOOS: android
           GOARCH: arm64
-          CGO_ENABLED: "0"
-        run: go build ./core ./adapter
+          CGO_ENABLED: '1'
+        run: |
+          export CC="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          test -x "$CC"
+          go build ./core ./adapter
