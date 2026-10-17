@@ -84,15 +84,21 @@ func (r *pcmRing) Push(samples []int16) {
 	defer r.mu.Unlock()
 	for _, sample := range samples {
 		value := uint16(sample)
-		for _, b := range []byte{byte(value), byte(value >> 8)} {
-			if r.size == len(r.data) {
-				r.read = (r.read + 1) % len(r.data)
-				r.size--
-			}
-			r.data[r.write] = b
-			r.write = (r.write + 1) % len(r.data)
-			r.size++
+		lo, hi := byte(value), byte(value>>8)
+		if r.size == len(r.data) {
+			r.read = (r.read + 1) % len(r.data)
+			r.size--
 		}
+		r.data[r.write] = lo
+		r.write = (r.write + 1) % len(r.data)
+		r.size++
+		if r.size == len(r.data) {
+			r.read = (r.read + 1) % len(r.data)
+			r.size--
+		}
+		r.data[r.write] = hi
+		r.write = (r.write + 1) % len(r.data)
+		r.size++
 	}
 }
 
