@@ -26,8 +26,8 @@ type shell struct{}
 func (g *shell) Update() error { return nil }
 
 func (g *shell) Draw(screen *ebiten.Image) {
-	screen.Fill(ebiten.Color{})
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("SATURDAY\n\nSega Saturn emulator\nAndroid frontend scaffold\n\nNext: disc / BIOS selection\nand core rendering"))
+	screen.Fill(color.RGBA{R: 8, G: 12, B: 20, A: 255})
+	ebitenutil.DebugPrint(screen, "SATURDAY\n\nSega Saturn emulator\nAndroid frontend scaffold\n\nNext: disc / BIOS selection\nand core rendering")
 }
 
 func (g *shell) Layout(outsideWidth, outsideHeight int) (int, int) {
