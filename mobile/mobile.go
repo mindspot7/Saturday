@@ -82,23 +82,31 @@ func newPCMRing() *pcmRing {
 func (r *pcmRing) Push(samples []int16) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, sample := range samples {
-		value := uint16(sample)
-		lo, hi := byte(value), byte(value>>8)
-		if r.size == len(r.data) {
-			r.read = (r.read + 1) % len(r.data)
-			r.size--
+
+	// Samples are interleaved stereo: keep writes and overflow drops on
+	// complete 4-byte frames so a full ring never shifts channel alignment.
+	for i := 0; i < len(samples); i += 2 {
+		if r.size+4 > len(r.data) {
+			// Audio reads are frame-aligned, so the oldest complete stereo
+			// frame can be discarded without swapping left/right channels.
+			r.read = (r.read + 4) % len(r.data)
+			r.size -= 4
 		}
-		r.data[r.write] = lo
+		left := uint16(samples[i])
+		r.data[r.write] = byte(left)
 		r.write = (r.write + 1) % len(r.data)
-		r.size++
-		if r.size == len(r.data) {
-			r.read = (r.read + 1) % len(r.data)
-			r.size--
+		r.data[r.write] = byte(left >> 8)
+		r.write = (r.write + 1) % len(r.data)
+
+		var right uint16
+		if i+1 < len(samples) {
+			right = uint16(samples[i+1])
 		}
-		r.data[r.write] = hi
+		r.data[r.write] = byte(right)
 		r.write = (r.write + 1) % len(r.data)
-		r.size++
+		r.data[r.write] = byte(right >> 8)
+		r.write = (r.write + 1) % len(r.data)
+		r.size += 4
 	}
 }
 
