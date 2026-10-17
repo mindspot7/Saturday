@@ -334,7 +334,7 @@ func (g *shell) Draw(screen *ebiten.Image) {
 	if status == "" {
 		status = "Ready. Select a Saturn disc to begin."
 	}
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("SATURDAY\\n\\nSega Saturn emulator\\n\\n%s\\n\\nSupports CHD and CUE/BIN", status))
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("SATURDAY\n\nSega Saturn emulator\n\n%s\n\nSupports CHD and CUE/BIN", status))
 }
 
 func (g *shell) Layout(outsideWidth, outsideHeight int) (int, int) {
