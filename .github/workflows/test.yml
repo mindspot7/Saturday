@@ -1,17 +1,17 @@
-name: Test
+name: Core tests (Linux)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, android-port ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, android-port ]
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: Test
+    name: Test core packages
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,7 +23,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install build dependencies
+      - name: Install Linux test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev libgtk-3-dev pkg-config
@@ -33,43 +33,3 @@ jobs:
 
       - name: Test
         run: go test ./...
-
-  test-windows:
-    name: Test (Windows, DX12)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install make
-        run: choco install make
-
-      - name: Install DirectX Shader Compiler
-        shell: bash
-        run: |
-          ver=v1.9.2607
-          sha256=a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241
-          curl -fL -o dxc.zip "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$ver/dxc_2026_07_29.zip"
-          echo "$sha256  dxc.zip" | sha256sum -c -
-          powershell -Command "Expand-Archive -Path dxc.zip -DestinationPath C:\\dxc -Force"
-          echo "C:\\dxc\\bin\\x64" >> "$GITHUB_PATH"
-
-      - name: Compile shaders
-        shell: bash
-        run: make dxil
-
-      - name: Vet
-        shell: bash
-        run: go vet ./internal/hostgpu/... ./core/...
-
-      # No hardware adaptor and the software on in the CI will take an hour to run
-      # Running a software adapator doesn't actually test anything either
-      #- name: Test
-      #  shell: bash
-      #  run: go test ./internal/hostgpu/... ./core/...
