@@ -5,6 +5,8 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -33,6 +35,16 @@ public final class MainActivity extends Activity {
     private EbitenView ebitenView;
     private TextView statusView;
     private File gameDirectory;
+    private boolean gameRunning;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable diagnosticsUpdater = new Runnable() {
+        @Override public void run() {
+            if (gameRunning && statusView != null) {
+                statusView.setText(Mobile.getDiagnostics());
+                uiHandler.postDelayed(this, 1000);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,12 +67,12 @@ public final class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         Button gamesButton = new Button(this);
-        gamesButton.setText("Open game folder");
+        gamesButton.setText("Choose game folder");
         gamesButton.setOnClickListener(v -> chooseGameFolder());
         actions.addView(gamesButton, new LinearLayout.LayoutParams(0, dp(48), 1));
 
         Button biosButton = new Button(this);
-        biosButton.setText("Load BIOS");
+        biosButton.setText("Optional BIOS");
         biosButton.setOnClickListener(v -> chooseBios());
         actions.addView(biosButton, new LinearLayout.LayoutParams(0, dp(48), 1));
         panel.addView(actions);
@@ -69,7 +81,7 @@ public final class MainActivity extends Activity {
         statusView.setTextColor(0xFFFFFFFF);
         statusView.setTextSize(13);
         statusView.setPadding(dp(4), dp(4), dp(4), dp(2));
-        statusView.setText("Saturday · Sega Saturn\nChoose a folder containing CHD or CUE/BIN files.");
+        statusView.setText("SATURDAY · SEGA SATURN\n\nBuilt-in HLE BIOS is enabled automatically. An external BIOS is optional.\n\nChoose a folder containing CHD or CUE/BIN files.");
         panel.addView(statusView);
 
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
@@ -165,8 +177,9 @@ public final class MainActivity extends Activity {
                 .setTitle("Select Saturn disc")
                 .setItems(labels, (dialog, which) -> {
                     String result = Mobile.loadDisc(discs.get(which).getAbsolutePath());
-                    statusView.setText(result == null || result.isEmpty()
-                            ? Mobile.getStatus() : result);
+                    gameRunning = result == null || result.isEmpty();
+                    statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
+                    if (gameRunning) uiHandler.postDelayed(diagnosticsUpdater, 1000);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -235,6 +248,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        uiHandler.removeCallbacks(diagnosticsUpdater);
         if (ebitenView != null) ebitenView.suspendGame();
         super.onPause();
     }
@@ -244,5 +258,6 @@ public final class MainActivity extends Activity {
         super.onResume();
         hideSystemUi();
         if (ebitenView != null) ebitenView.resumeGame();
+        if (gameRunning) uiHandler.postDelayed(diagnosticsUpdater, 1000);
     }
 }
