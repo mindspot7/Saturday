@@ -1,0 +1,35 @@
+name: Android core compile
+
+on:
+  push:
+    branches: [main, android-port]
+  pull_request:
+    branches: [main, android-port]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-android-core:
+    name: Compile emulator core for Android arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # This is a cross-compilation smoke test for the reusable core, not
+      # an APK build. The Android app entry point and device integration
+      # are separate milestones.
+      - name: Compile core and adapter for Android arm64
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: go build ./core ./adapter
