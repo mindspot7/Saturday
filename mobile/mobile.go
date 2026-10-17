@@ -58,6 +58,7 @@ var session struct {
 	buttons     uint32
 	status      string
 	started     bool
+	frameCount  uint64
 	audioStream *pcmRing
 	audioPlayer *audio.Player
 }
@@ -234,7 +235,8 @@ func LoadDisc(path string) string {
 	session.emu = emu
 	session.disc = disc
 	session.started = true
-	session.status = "Running: " + filepath.Base(path)
+	session.frameCount = 0
+	session.status = "Running with built-in HLE BIOS: " + filepath.Base(path)
 	return ""
 }
 
@@ -263,6 +265,22 @@ func GetStatus() string {
 	return session.status
 }
 
+// GetDiagnostics returns live emulation diagnostics for troubleshooting black
+// screens: frame progress and the master SH-2 program counter.
+func GetDiagnostics() string {
+	session.Lock()
+	defer session.Unlock()
+	if session.emu == nil || !session.started {
+		if session.status == "" {
+			return "No game running. Built-in HLE BIOS is used when no external BIOS is selected."
+		}
+		return session.status
+	}
+	pc, sr := session.emu.DebugCPUState()
+	return fmt.Sprintf("%s\nFrames: %d · Master PC: %08X · SR: %08X",
+		session.status, session.frameCount, pc, sr)
+}
+
 type shell struct {
 	frameImage *ebiten.Image
 	frameWidth int
@@ -276,6 +294,7 @@ func (g *shell) Update() error {
 		ensureAudioLocked()
 		session.emu.SetInput(0, session.buttons)
 		session.emu.RunFrame()
+		session.frameCount++
 		if session.audioStream != nil {
 			session.audioStream.Push(session.emu.GetAudioSamples())
 		}
