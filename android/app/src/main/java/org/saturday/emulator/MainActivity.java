@@ -18,6 +18,7 @@ import android.widget.TextView;
 import androidx.documentfile.provider.DocumentFile;
 
 import org.saturday.emulator.mobile.EbitenView;
+import org.saturday.emulator.mobile.Mobile;
 
 import java.io.File;
 import java.io.FileOutputStream;
