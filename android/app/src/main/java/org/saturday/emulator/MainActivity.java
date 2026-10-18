@@ -201,9 +201,12 @@ public final class MainActivity extends Activity {
         menuParams.setMargins(0, dp(8), dp(8), 0);
         root.addView(menuButton, menuParams);
         setContentView(root);
-        Mobile.setFastBoot(getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false));
-        Mobile.setDisplayMode(getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"));
-        Mobile.setTextureFilter(getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"));
+        android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+        Mobile.setFastBoot(prefs.getBoolean("fast_boot", false));
+        Mobile.setDisplayMode(prefs.getString("display_mode", "4:3"));
+        Mobile.setTextureFilter(prefs.getString("texture_filter", "nearest"));
+        Mobile.setRenderer(prefs.getString("renderer", "software"));
+        Mobile.setUpscale(prefs.getString("upscale", "1x"));
         restoreGameLibrary();
     }
 
@@ -596,13 +599,14 @@ public final class MainActivity extends Activity {
 
     private void showInGameSettings() {
         final String[] choices = {
-                "Renderer: Software",
-                "Renderer: GPU",
-                "Internal resolution: 1x",
-                "Internal resolution: 2x",
-                "Internal resolution: 4x",
-                "Internal resolution: 8x",
-                "Internal resolution: 16x",
+                "Renderer: " + getPreferences(MODE_PRIVATE).getString("renderer", "software"),
+                "Switch renderer to " + (getPreferences(MODE_PRIVATE).getString("renderer", "software").equals("software") ? "GPU" : "Software"),
+                "Internal resolution: " + getPreferences(MODE_PRIVATE).getString("upscale", "1x") + " (tap to choose)",
+                "Set internal resolution: 1x",
+                "Set internal resolution: 2x",
+                "Set internal resolution: 4x",
+                "Set internal resolution: 8x",
+                "Set internal resolution: 16x",
                 "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
                 "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off")
@@ -611,24 +615,30 @@ public final class MainActivity extends Activity {
                 .setTitle("Saturday settings")
                 .setItems(choices, (dialog, which) -> {
                     String result = "";
-                    if (which == 0) result = Mobile.setRenderer("software");
-                    else if (which == 1) result = Mobile.setRenderer("gpu");
-                    else if (which >= 2 && which <= 6) {
-                        String[] scales = {"1x", "2x", "4x", "8x", "16x"};
-                        result = Mobile.setUpscale(scales[which - 2]);
-                    } else if (which == 7) {
-                        String current = getPreferences(MODE_PRIVATE).getString("display_mode", "4:3");
-                        String next = current.equals("4:3") ? "stretch" : "4:3";
-                        getPreferences(MODE_PRIVATE).edit().putString("display_mode", next).apply();
-                        result = Mobile.setDisplayMode(next);
+                    android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+                    if (which == 0 || which == 1) {
+                        String current = prefs.getString("renderer", "software");
+                        String next = current.equals("software") ? "gpu" : "software";
+                        result = Mobile.setRenderer(next);
+                        if (result == null || result.isEmpty()) prefs.edit().putString("renderer", next).apply();
+                    } else if (which >= 2 && which <= 7) {
+                        String[] scales = {"1x", "1x", "2x", "4x", "8x", "16x"};
+                        String next = scales[which - 2];
+                        result = Mobile.setUpscale(next);
+                        if (result == null || result.isEmpty()) prefs.edit().putString("upscale", next).apply();
                     } else if (which == 8) {
-                        String current = getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest");
-                        String next = current.equals("nearest") ? "bilinear" : "nearest";
-                        getPreferences(MODE_PRIVATE).edit().putString("texture_filter", next).apply();
-                        result = Mobile.setTextureFilter(next);
+                        String current = prefs.getString("display_mode", "4:3");
+                        String next = current.equals("4:3") ? "stretch" : "4:3";
+                        prefs.edit().putString("display_mode", next).apply();
+                        result = Mobile.setDisplayMode(next);
                     } else if (which == 9) {
-                        boolean enabled = !getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false);
-                        getPreferences(MODE_PRIVATE).edit().putBoolean("fast_boot", enabled).apply();
+                        String current = prefs.getString("texture_filter", "nearest");
+                        String next = current.equals("nearest") ? "bilinear" : "nearest";
+                        prefs.edit().putString("texture_filter", next).apply();
+                        result = Mobile.setTextureFilter(next);
+                    } else if (which == 10) {
+                        boolean enabled = !prefs.getBoolean("fast_boot", false);
+                        prefs.edit().putBoolean("fast_boot", enabled).apply();
                         Mobile.setFastBoot(enabled);
                         result = "Fast boot " + (enabled ? "enabled" : "disabled")
                                 + ". It applies on the next game launch; HLE BIOS already skips the retail BIOS.";
