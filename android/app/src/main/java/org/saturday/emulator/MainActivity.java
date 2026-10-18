@@ -39,6 +39,7 @@ public final class MainActivity extends Activity {
     private LinearLayout controlPanel;
     private Button menuButton;
     private LinearLayout gameListContainer;
+    private LinearLayout recentListContainer;
     private EditText searchInput;
     private final List<File> libraryDiscs = new ArrayList<>();
     private File gameDirectory;
@@ -103,6 +104,16 @@ public final class MainActivity extends Activity {
         searchInput.setPadding(dp(10), 0, dp(10), 0);
         controlPanel.addView(searchInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+
+        TextView recentTitle = new TextView(this);
+        recentTitle.setText("RECENTLY PLAYED");
+        recentTitle.setTextColor(0xFF93C5FD);
+        recentTitle.setTextSize(12);
+        recentTitle.setPadding(dp(4), dp(8), dp(4), dp(4));
+        controlPanel.addView(recentTitle);
+        recentListContainer = new LinearLayout(this);
+        recentListContainer.setOrientation(LinearLayout.VERTICAL);
+        controlPanel.addView(recentListContainer);
 
         ScrollView libraryScroll = new ScrollView(this);
         libraryScroll.setFillViewport(false);
@@ -248,6 +259,7 @@ public final class MainActivity extends Activity {
         if (gameListContainer == null) return;
         gameListContainer.removeAllViews();
         String query = searchInput == null ? "" : searchInput.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
+        renderRecentGames();
         int shown = 0;
         for (File disc : libraryDiscs) {
             if (!disc.getName().toLowerCase(java.util.Locale.ROOT).contains(query)) continue;
@@ -289,11 +301,53 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void renderRecentGames() {
+        if (recentListContainer == null) return;
+        recentListContainer.removeAllViews();
+        java.util.Set<String> available = new java.util.HashSet<>();
+        for (File disc : libraryDiscs) available.add(disc.getAbsolutePath());
+        java.util.List<String> recent = getPreferences(MODE_PRIVATE)
+                .getStringSet("recent_games", java.util.Collections.<String>emptySet())
+                .stream().filter(available::contains).limit(3)
+                .collect(java.util.stream.Collectors.toList());
+        if (recent.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("Your recently played games will appear here.");
+            empty.setTextColor(0xFFD1D5DB);
+            empty.setTextSize(12);
+            empty.setPadding(dp(8), dp(2), dp(8), dp(6));
+            recentListContainer.addView(empty);
+            return;
+        }
+        for (String path : recent) {
+            File disc = new File(path);
+            Button recentButton = new Button(this);
+            recentButton.setText("▶  " + disc.getName());
+            recentButton.setAllCaps(false);
+            recentButton.setTextSize(12);
+            recentButton.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
+            recentButton.setOnClickListener(v -> startGame(disc));
+            recentListContainer.addView(recentButton, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+        }
+    }
+
+    private void rememberRecentGame(File disc) {
+        java.util.LinkedHashSet<String> recent = new java.util.LinkedHashSet<>();
+        recent.add(disc.getAbsolutePath());
+        recent.addAll(getPreferences(MODE_PRIVATE).getStringSet(
+                "recent_games", java.util.Collections.<String>emptySet()));
+        while (recent.size() > 10) recent.remove(recent.iterator().next());
+        getPreferences(MODE_PRIVATE).edit().putStringSet("recent_games", recent).apply();
+    }
+
     private void startGame(File disc) {
         String result = Mobile.loadDisc(disc.getAbsolutePath());
         gameRunning = result == null || result.isEmpty();
         statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
         if (gameRunning) {
+            rememberRecentGame(disc);
+            renderRecentGames();
             controlPanel.setVisibility(View.GONE);
             menuButton.setVisibility(View.VISIBLE);
             menuButton.setText("MENU");
