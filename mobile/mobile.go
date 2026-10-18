@@ -699,6 +699,9 @@ func (g *shell) Draw(screen *ebiten.Image) {
 					screen.DrawRectShader(width, height, shader, shaderOpts)
 					return
 				}
+				if session.status == "" || !strings.Contains(session.status, "CRT shader unavailable") {
+					session.status = "CRT shader unavailable; using nearest filter: " + err.Error()
+				}
 			}
 			drawOpts := &ebiten.DrawImageOptions{}
 			if configuredTextureFilter == "bilinear" {
