@@ -306,6 +306,44 @@ func (e *Emulator) autoDetectRegion() {
 	}
 }
 
+// ApplyRAMCheat writes a fixed value to Saturn work RAM. It intentionally
+// accepts only the two work-RAM regions, not memory-mapped hardware registers,
+// BIOS, or backup RAM, so a malformed cheat cannot trigger peripheral writes.
+// Width is 1, 2, or 4 bytes; multi-byte writes must be naturally aligned.
+// Call between RunFrame calls while the CPU workers are parked.
+func (e *Emulator) ApplyRAMCheat(address uint32, value uint32, width int) error {
+	addr := address & 0x07FFFFFF
+	var start, end uint32
+	switch {
+	case addr >= 0x00200000 && addr <= 0x002FFFFF:
+		start, end = 0x00200000, 0x002FFFFF
+	case addr >= 0x06000000 && addr <= 0x07FFFFFF:
+		start, end = 0x06000000, 0x07FFFFFF
+	default:
+		return fmt.Errorf("cheat address %08X is outside Saturn work RAM", address)
+	}
+	if width != 1 && width != 2 && width != 4 {
+		return fmt.Errorf("unsupported cheat width %d", width)
+	}
+	if width > 1 && addr%uint32(width) != 0 {
+		return fmt.Errorf("cheat address %08X is not aligned to %d bytes", address, width)
+	}
+	offset := addr & 0x000FFFFF
+	if offset+uint32(width) > 0x00100000 || addr+uint32(width)-1 > end {
+		return fmt.Errorf("cheat write at %08X crosses a work-RAM boundary", address)
+	}
+	switch width {
+	case 1:
+		e.bus.Write8(addr, uint8(value))
+	case 2:
+		e.bus.Write16(addr, uint16(value))
+	case 4:
+		e.bus.Write32(addr, value)
+	}
+	_ = start
+	return nil
+}
+
 // GetSRAM returns a copy of the internal backup RAM.
 func (e *Emulator) GetSRAM() []byte { return e.bus.GetBackupRAM() }
 
