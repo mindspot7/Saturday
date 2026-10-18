@@ -25,6 +25,24 @@ import (
 	"github.com/user-none/erings/core"
 )
 
+var crtShaderOnce sync.Once
+var crtShader *ebiten.Shader
+var crtShaderErr error
+
+func getCRTShader() (*ebiten.Shader, error) {
+	crtShaderOnce.Do(func() {
+		crtShader, crtShaderErr = ebiten.NewShader([]byte(`package main
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	c := imageSrc0At(srcPos)
+	lineShade := 0.90 + 0.10*cos(dstPos.y*3.14159265)
+	return vec4(c.rgb*lineShade, c.a) * color
+}
+`))
+	})
+	return crtShader, crtShaderErr
+}
+
 func init() {
 	mobile.SetGame(&shell{})
 }
@@ -499,8 +517,8 @@ func SetDisplayMode(name string) string {
 func SetTextureFilter(name string) string {
     session.Lock()
     defer session.Unlock()
-    if name != "nearest" && name != "bilinear" {
-        return "Unsupported texture filter. Choose nearest or bilinear."
+    if name != "nearest" && name != "bilinear" && name != "crt" {
+        return "Unsupported texture filter. Choose nearest, bilinear, or crt."
     }
     configuredTextureFilter = name
     session.status = "Texture filter: " + name
@@ -669,6 +687,19 @@ func (g *shell) Draw(screen *ebiten.Image) {
 					targetW = targetH * 4.0 / 3.0
 				}
 			}
+			offsetX := (float64(bounds.Dx()) - targetW) / 2
+			offsetY := (float64(bounds.Dy()) - targetH) / 2
+			if configuredTextureFilter == "crt" {
+				shader, err := getCRTShader()
+				if err == nil {
+					shaderOpts := &ebiten.DrawRectShaderOptions{}
+					shaderOpts.Images[0] = g.frameImage
+					shaderOpts.GeoM.Scale(targetW/float64(width), targetH/float64(height))
+					shaderOpts.GeoM.Translate(offsetX, offsetY)
+					screen.DrawRectShader(width, height, shader, shaderOpts)
+					return
+				}
+			}
 			drawOpts := &ebiten.DrawImageOptions{}
 			if configuredTextureFilter == "bilinear" {
 				drawOpts.Filter = ebiten.FilterLinear
@@ -676,10 +707,7 @@ func (g *shell) Draw(screen *ebiten.Image) {
 				drawOpts.Filter = ebiten.FilterNearest
 			}
 			drawOpts.GeoM.Scale(targetW/float64(width), targetH/float64(height))
-			drawOpts.GeoM.Translate(
-				(float64(bounds.Dx())-targetW)/2,
-				(float64(bounds.Dy())-targetH)/2,
-			)
+			drawOpts.GeoM.Translate(offsetX, offsetY)
 			screen.DrawImage(g.frameImage, drawOpts)
 			return
 		}
