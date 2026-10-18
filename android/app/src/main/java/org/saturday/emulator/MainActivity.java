@@ -13,6 +13,8 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ScrollView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -36,6 +38,9 @@ public final class MainActivity extends Activity {
     private TextView statusView;
     private LinearLayout controlPanel;
     private Button menuButton;
+    private LinearLayout gameListContainer;
+    private EditText searchInput;
+    private final List<File> libraryDiscs = new ArrayList<>();
     private File gameDirectory;
     private boolean gameRunning;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -81,6 +86,38 @@ public final class MainActivity extends Activity {
         biosButton.setOnClickListener(v -> chooseBios());
         actions.addView(biosButton, new LinearLayout.LayoutParams(0, dp(48), 1));
         controlPanel.addView(actions);
+
+        TextView libraryTitle = new TextView(this);
+        libraryTitle.setText("GAME LIBRARY");
+        libraryTitle.setTextColor(0xFF93C5FD);
+        libraryTitle.setTextSize(12);
+        libraryTitle.setPadding(dp(4), dp(10), dp(4), dp(4));
+        controlPanel.addView(libraryTitle);
+
+        searchInput = new EditText(this);
+        searchInput.setSingleLine(true);
+        searchInput.setTextSize(14);
+        searchInput.setTextColor(0xFFFFFFFF);
+        searchInput.setHintTextColor(0xFF9CA3AF);
+        searchInput.setHint("Search your Saturn games");
+        searchInput.setPadding(dp(10), 0, dp(10), 0);
+        controlPanel.addView(searchInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+
+        ScrollView libraryScroll = new ScrollView(this);
+        libraryScroll.setFillViewport(false);
+        gameListContainer = new LinearLayout(this);
+        gameListContainer.setOrientation(LinearLayout.VERTICAL);
+        libraryScroll.addView(gameListContainer);
+        LinearLayout.LayoutParams libraryParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(190));
+        libraryParams.topMargin = dp(4);
+        controlPanel.addView(libraryScroll, libraryParams);
+        searchInput.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { renderGameLibrary(); }
+            @Override public void afterTextChanged(android.text.Editable s) {}
+        });
 
         statusView = new TextView(this);
         statusView.setTextColor(0xFFFFFFFF);
@@ -200,23 +237,68 @@ public final class MainActivity extends Activity {
             statusView.setText("No .CHD or .CUE files found in this folder.");
             return;
         }
-        String[] labels = new String[discs.size()];
-        for (int i = 0; i < discs.size(); i++) labels[i] = discs.get(i).getName();
-        new AlertDialog.Builder(this)
-                .setTitle("Select Saturn disc")
-                .setItems(labels, (dialog, which) -> {
-                    String result = Mobile.loadDisc(discs.get(which).getAbsolutePath());
-                    gameRunning = result == null || result.isEmpty();
-                    statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
-                    if (gameRunning) {
-                        controlPanel.setVisibility(View.GONE);
-                        menuButton.setVisibility(View.VISIBLE);
-                        menuButton.setText("MENU");
-                        uiHandler.removeCallbacks(diagnosticsUpdater);
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        libraryDiscs.clear();
+        libraryDiscs.addAll(discs);
+        renderGameLibrary();
+        statusView.setText(discs.size() + " Saturn game" + (discs.size() == 1 ? "" : "s")
+                + " found. Select a title to start playing.");
+    }
+
+    private void renderGameLibrary() {
+        if (gameListContainer == null) return;
+        gameListContainer.removeAllViews();
+        String query = searchInput == null ? "" : searchInput.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
+        int shown = 0;
+        for (File disc : libraryDiscs) {
+            if (!disc.getName().toLowerCase(java.util.Locale.ROOT).contains(query)) continue;
+            shown++;
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.HORIZONTAL);
+            item.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            item.setPadding(dp(10), dp(4), dp(6), dp(4));
+            item.setBackgroundColor(shown % 2 == 0 ? 0xFF1F2937 : 0xFF273449);
+
+            TextView title = new TextView(this);
+            title.setText(disc.getName());
+            title.setTextColor(0xFFFFFFFF);
+            title.setTextSize(13);
+            title.setMaxLines(2);
+            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            item.addView(title, new LinearLayout.LayoutParams(0, dp(48), 1));
+
+            Button play = new Button(this);
+            play.setText("PLAY");
+            play.setAllCaps(false);
+            play.setTextSize(12);
+            play.setOnClickListener(v -> startGame(disc));
+            item.addView(play, new LinearLayout.LayoutParams(dp(82), dp(44)));
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            itemParams.bottomMargin = dp(3);
+            gameListContainer.addView(item, itemParams);
+        }
+        if (shown == 0) {
+            TextView empty = new TextView(this);
+            empty.setText(libraryDiscs.isEmpty()
+                    ? "Your library is empty. Choose a folder with .CHD or .CUE games."
+                    : "No games match your search.");
+            empty.setTextColor(0xFFD1D5DB);
+            empty.setTextSize(13);
+            empty.setPadding(dp(10), dp(12), dp(10), dp(12));
+            gameListContainer.addView(empty);
+        }
+    }
+
+    private void startGame(File disc) {
+        String result = Mobile.loadDisc(disc.getAbsolutePath());
+        gameRunning = result == null || result.isEmpty();
+        statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
+        if (gameRunning) {
+            controlPanel.setVisibility(View.GONE);
+            menuButton.setVisibility(View.VISIBLE);
+            menuButton.setText("MENU");
+            uiHandler.removeCallbacks(diagnosticsUpdater);
+        }
     }
 
     private void copyUri(Uri uri, File destination) throws Exception {
