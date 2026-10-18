@@ -289,10 +289,30 @@ public final class MainActivity extends Activity {
             File disc = new File(path);
             if (disc.isFile()) libraryDiscs.add(disc);
         }
+        rebuildCoverIndex();
         renderGameLibrary();
         if (!libraryDiscs.isEmpty()) {
             statusView.setText(libraryDiscs.size() + " saved Saturn game"
                     + (libraryDiscs.size() == 1 ? "" : "s") + " ready.");
+        }
+    }
+
+    private void rebuildCoverIndex() {
+        libraryCovers.clear();
+        java.util.Set<String> scanned = new java.util.HashSet<>();
+        for (File disc : libraryDiscs) {
+            File parent = disc.getParentFile();
+            if (parent == null || !scanned.add(parent.getAbsolutePath())) continue;
+            File[] files = parent.listFiles();
+            if (files == null) continue;
+            for (File file : files) {
+                if (!file.isFile()) continue;
+                String lower = file.getName().toLowerCase(java.util.Locale.ROOT);
+                if (lower.endsWith(".png") || lower.endsWith(".jpg")
+                        || lower.endsWith(".jpeg") || lower.endsWith(".webp")) {
+                    libraryCovers.put(fileStem(file.getName()), file);
+                }
+            }
         }
     }
 
