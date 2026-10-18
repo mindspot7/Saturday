@@ -593,7 +593,7 @@ public final class MainActivity extends Activity {
             if (!oldPath.equals(path) && recent.size() < 10) recent.add(oldPath);
         }
         getPreferences(MODE_PRIVATE).edit()
-                .putString("recent_games_paths", android.text.TextUtils.join("\\n", recent))
+                .putString("recent_games_paths", android.text.TextUtils.join("\n", recent))
                 .apply();
     }
 
