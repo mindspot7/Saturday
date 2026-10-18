@@ -202,6 +202,8 @@ public final class MainActivity extends Activity {
         root.addView(menuButton, menuParams);
         setContentView(root);
         Mobile.setFastBoot(getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false));
+        Mobile.setDisplayMode(getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"));
+        Mobile.setTextureFilter(getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"));
         restoreGameLibrary();
     }
 
@@ -601,6 +603,8 @@ public final class MainActivity extends Activity {
                 "Internal resolution: 4x",
                 "Internal resolution: 8x",
                 "Internal resolution: 16x",
+                "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
+                "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off")
         };
         new AlertDialog.Builder(this)
@@ -613,6 +617,16 @@ public final class MainActivity extends Activity {
                         String[] scales = {"1x", "2x", "4x", "8x", "16x"};
                         result = Mobile.setUpscale(scales[which - 2]);
                     } else if (which == 7) {
+                        String current = getPreferences(MODE_PRIVATE).getString("display_mode", "4:3");
+                        String next = current.equals("4:3") ? "stretch" : "4:3";
+                        getPreferences(MODE_PRIVATE).edit().putString("display_mode", next).apply();
+                        result = Mobile.setDisplayMode(next);
+                    } else if (which == 8) {
+                        String current = getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest");
+                        String next = current.equals("nearest") ? "bilinear" : "nearest";
+                        getPreferences(MODE_PRIVATE).edit().putString("texture_filter", next).apply();
+                        result = Mobile.setTextureFilter(next);
+                    } else if (which == 9) {
                         boolean enabled = !getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false);
                         getPreferences(MODE_PRIVATE).edit().putBoolean("fast_boot", enabled).apply();
                         Mobile.setFastBoot(enabled);
