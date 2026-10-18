@@ -209,6 +209,7 @@ public final class MainActivity extends Activity {
         Mobile.setTextureFilter(prefs.getString("texture_filter", "nearest"));
         Mobile.setRenderer(prefs.getString("renderer", "software"));
         Mobile.setUpscale(prefs.getString("upscale", "1x"));
+        Mobile.setCheats(prefs.getString("ram_cheats", ""));
         restoreGameLibrary();
     }
 
@@ -613,7 +614,8 @@ public final class MainActivity extends Activity {
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off"),
                 "Controller mapping…",
                 "Save state now",
-                "Load state…"
+                "Load state…",
+                "RAM cheats…"
         };
         new AlertDialog.Builder(this)
                 .setTitle("Saturday settings")
@@ -668,6 +670,9 @@ public final class MainActivity extends Activity {
                                 uiHandler.removeCallbacks(diagnosticsUpdater);
                             }
                         }
+                    } else if (which == 13) {
+                        showCheatsDialog();
+                        return;
                     }
                     statusView.setText(result == null || result.isEmpty() ? Mobile.getDiagnostics() : result);
                 })
@@ -723,6 +728,38 @@ public final class MainActivity extends Activity {
                             .show();
                 })
                 .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void showCheatsDialog() {
+        final android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+        final EditText editor = new EditText(this);
+        editor.setSingleLine(false);
+        editor.setMinLines(5);
+        editor.setMaxLines(12);
+        editor.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        editor.setTextSize(14);
+        editor.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        editor.setHint("Example:\n00200000=000000FF\n06010000=7F");
+        editor.setText(prefs.getString("ram_cheats", ""));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(editor);
+        new AlertDialog.Builder(this)
+                .setTitle("RAM cheats")
+                .setMessage("One repeating write per line: ADDRESS=VALUE. Use hexadecimal addresses and 2, 4, or 8 hex digits for the value. Only Saturn work RAM is supported. Prefix a line with # for a comment.")
+                .setView(scroll)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (dialog, which) -> {
+                    String source = editor.getText().toString();
+                    String result = Mobile.setCheats(source);
+                    if (result != null && result.startsWith("Saved ")) {
+                        prefs.edit().putString("ram_cheats", source).apply();
+                    }
+                    statusView.setText(result == null || result.isEmpty() ? "Cheats updated." : result);
+                })
                 .show();
     }
 
