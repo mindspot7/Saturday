@@ -189,6 +189,74 @@ func LoadBIOS(path string) string {
 	return ""
 }
 
+// SaveState writes a complete emulator state to an app-private path. The
+// core serializes CPU, video, audio, memory and CD subsystem state. The path
+// should be unique to the selected game; callers should not expose arbitrary
+// external paths to untrusted input.
+func SaveState(path string) string {
+	session.Lock()
+	defer session.Unlock()
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "Choose a save-state destination."
+	}
+	if session.emu == nil || !session.started {
+		return "No game is currently running."
+	}
+	data, err := session.emu.Serialize()
+	if err != nil {
+		return "Save state failed: " + err.Error()
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "Save state failed: " + err.Error()
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return "Save state failed: " + err.Error()
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "Save state failed: " + err.Error()
+	}
+	return "Save state created."
+}
+
+// LoadState restores a complete state into the currently running game.
+// The core requires the same disc identity and BIOS mode as the saved state.
+// Deserialize may partially mutate the machine on a malformed state, so a
+// failed restore closes the session rather than continuing from uncertain data.
+func LoadState(path string) string {
+	session.Lock()
+	defer session.Unlock()
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "Choose a save-state file."
+	}
+	if session.emu == nil || !session.started {
+		return "Start the matching game before loading a save state."
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "Load state failed: " + err.Error()
+	}
+	if err := session.emu.Deserialize(data); err != nil {
+		session.emu.Close()
+		session.emu = nil
+		session.started = false
+		if session.disc != nil {
+			_ = session.disc.Close()
+			session.disc = nil
+		}
+		session.status = "Save state rejected; game stopped for safety: " + err.Error()
+		return session.status
+	}
+	session.backupRAM = session.emu.GetSRAM()
+	persistBackupRAMLocked()
+	session.status = "Save state loaded."
+	return ""
+}
+
 // LoadDisc opens a .chd or .cue disc image and starts the Saturn core.
 // For CUE images, the referenced BIN files must remain beside the CUE file.
 // The caller should copy the CUE and all referenced track files into one
