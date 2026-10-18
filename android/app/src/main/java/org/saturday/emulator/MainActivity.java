@@ -609,7 +609,8 @@ public final class MainActivity extends Activity {
                 "Internal resolution: 16x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("16x") ? " ✓" : ""),
                 "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
                 "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
-                "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off")
+                "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off"),
+                "Controller mapping…"
         };
         new AlertDialog.Builder(this)
                 .setTitle("Saturday settings")
@@ -641,8 +642,62 @@ public final class MainActivity extends Activity {
                         Mobile.setFastBoot(enabled);
                         result = "Fast boot " + (enabled ? "enabled" : "disabled")
                                 + ". It applies on the next game launch; HLE BIOS already skips the retail BIOS.";
+                    } else if (which == 10) {
+                        showControllerMappingDialog();
+                        return;
                     }
                     statusView.setText(result == null || result.isEmpty() ? Mobile.getDiagnostics() : result);
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private static final int[] MAPPABLE_KEYS = {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
+            KeyEvent.KEYCODE_BUTTON_X, KeyEvent.KEYCODE_BUTTON_Y,
+            KeyEvent.KEYCODE_BUTTON_1, KeyEvent.KEYCODE_BUTTON_2,
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_L2,
+            KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_BUTTON_R2,
+            KeyEvent.KEYCODE_BUTTON_START, KeyEvent.KEYCODE_ENTER
+    };
+
+    private static final String[] MAPPABLE_KEY_NAMES = {
+            "D-pad Up", "D-pad Down", "D-pad Left", "D-pad Right",
+            "Face button A", "Face button B", "Face button X", "Face button Y",
+            "Extra button 1", "Extra button 2", "L1", "L2", "R1", "R2",
+            "Start", "Enter"
+    };
+
+    private static final String[] SATURN_TARGETS = {
+            "Disabled", "Up", "Down", "Left", "Right", "A", "B", "C",
+            "X", "Y", "Z", "L", "R", "Start"
+    };
+
+    private void showControllerMappingDialog() {
+        final android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+        new AlertDialog.Builder(this)
+                .setTitle("Choose a physical input to remap")
+                .setItems(MAPPABLE_KEY_NAMES, (dialog, index) -> {
+                    int keyCode = MAPPABLE_KEYS[index];
+                    int defaultTarget = defaultSaturnButtonForKey(keyCode);
+                    int current = prefs.getInt("controller_map_" + keyCode, defaultTarget);
+                    String[] labels = new String[SATURN_TARGETS.length];
+                    for (int i = 0; i < labels.length; i++) {
+                        labels[i] = SATURN_TARGETS[i] + (current == i - 1 ? " ✓" : "");
+                    }
+                    new AlertDialog.Builder(this)
+                            .setTitle(MAPPABLE_KEY_NAMES[index] + " → Saturn button")
+                            .setSingleChoiceItems(labels, current + 1, (targetDialog, targetIndex) -> {
+                                int target = targetIndex - 1;
+                                prefs.edit().putInt("controller_map_" + keyCode, target).apply();
+                                targetDialog.dismiss();
+                                statusView.setText(MAPPABLE_KEY_NAMES[index] + " mapped to "
+                                        + SATURN_TARGETS[targetIndex] + ".");
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
                 })
                 .setNegativeButton("Close", null)
                 .show();
@@ -735,6 +790,12 @@ public final class MainActivity extends Activity {
     }
 
     private int saturnButtonForKey(int keyCode) {
+        int defaultTarget = defaultSaturnButtonForKey(keyCode);
+        if (defaultTarget < 0) return -1;
+        return getPreferences(MODE_PRIVATE).getInt("controller_map_" + keyCode, defaultTarget);
+    }
+
+    private int defaultSaturnButtonForKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP: return 0;
             case KeyEvent.KEYCODE_DPAD_DOWN: return 1;
