@@ -12,8 +12,8 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,11 +189,13 @@ func SetCheats(source string) string {
 		if len(parts) != 2 {
 			return fmt.Sprintf("Cheat line %d: use ADDRESS=VALUE.", lineNo+1)
 		}
-		addressText := strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(parts[0]), "0X"))
-		valueText := strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(parts[1]), "0X"))
-		if len(addressText) < 1 || len(addressText) > 8 ||
+		addressText := strings.TrimSpace(parts[0])
+		valueText := strings.TrimSpace(parts[1])
+		addressText = strings.TrimPrefix(strings.ToUpper(addressText), "0X")
+		valueText = strings.TrimPrefix(strings.ToUpper(valueText), "0X")
+		if len(addressText) != 8 ||
 			(len(valueText) != 2 && len(valueText) != 4 && len(valueText) != 8) {
-			return fmt.Sprintf("Cheat line %d: address must be up to 8 hex digits and value must be 2, 4, or 8 digits.", lineNo+1)
+			return fmt.Sprintf("Cheat line %d: address must be 8 hex digits and value must be 2, 4, or 8 digits.", lineNo+1)
 		}
 		address, err := strconv.ParseUint(addressText, 16, 32)
 		if err != nil {
