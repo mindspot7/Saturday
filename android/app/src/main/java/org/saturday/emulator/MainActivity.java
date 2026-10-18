@@ -610,7 +610,7 @@ public final class MainActivity extends Activity {
                 "Internal resolution: 8x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("8x") ? " ✓" : ""),
                 "Internal resolution: 16x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("16x") ? " ✓" : ""),
                 "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
-                "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
+                "Texture filter: " + textureFilterLabel(getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest")),
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off"),
                 "Controller mapping…",
                 "Save state now",
@@ -638,9 +638,13 @@ public final class MainActivity extends Activity {
                         result = Mobile.setDisplayMode(next);
                     } else if (which == 8) {
                         String current = prefs.getString("texture_filter", "nearest");
-                        String next = current.equals("nearest") ? "bilinear" : "nearest";
-                        prefs.edit().putString("texture_filter", next).apply();
+                        String next = current.equals("nearest") ? "bilinear"
+                                : current.equals("bilinear") ? "crt" : "nearest";
                         result = Mobile.setTextureFilter(next);
+                        if (result == null || result.isEmpty()) {
+                            prefs.edit().putString("texture_filter", next).apply();
+                            result = "Texture filter: " + textureFilterLabel(next);
+                        }
                     } else if (which == 9) {
                         boolean enabled = !prefs.getBoolean("fast_boot", false);
                         prefs.edit().putBoolean("fast_boot", enabled).apply();
@@ -729,6 +733,12 @@ public final class MainActivity extends Activity {
                 })
                 .setNegativeButton("Close", null)
                 .show();
+    }
+
+    private String textureFilterLabel(String value) {
+        if ("bilinear".equals(value)) return "Bilinear";
+        if ("crt".equals(value)) return "CRT scanlines";
+        return "Nearest";
     }
 
     private void showCheatsDialog() {
