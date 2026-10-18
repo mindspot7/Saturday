@@ -610,8 +610,8 @@ func GetDiagnostics() string {
 		return session.status
 	}
 	pc, sr := session.emu.DebugMasterPC(), session.emu.DebugMasterSR()
-	return fmt.Sprintf("%s\nFrames: %d · Master PC: %08X · SR: %08X",
-		session.status, session.frameCount, pc, sr)
+	return fmt.Sprintf("%s\nFrames: %d · Master PC: %08X · SR: %08X\nRenderer: %s",
+		session.status, session.frameCount, pc, sr, session.emu.RendererName())
 }
 
 type shell struct {
