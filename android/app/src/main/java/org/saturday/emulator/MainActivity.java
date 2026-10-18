@@ -348,7 +348,7 @@ public final class MainActivity extends Activity {
             try {
                 String html = readText(new URL(BOXART_INDEX));
                 List<String> remoteNames = new ArrayList<>();
-                Matcher matcher = Pattern.compile("href=\\"([^\\"]+\\.png)\\\"", Pattern.CASE_INSENSITIVE).matcher(html);
+                Matcher matcher = Pattern.compile("href=\"([^\"]+\\.png)\"", Pattern.CASE_INSENSITIVE).matcher(html);
                 while (matcher.find()) {
                     String href = matcher.group(1);
                     String decoded;
