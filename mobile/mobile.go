@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -58,6 +59,8 @@ var session struct {
 	backupPath  string
 	backupRAM   []byte
 	lastBackupFrame uint64
+	cheats          []ramCheat
+	cheatSource     string
 	buttons     uint32
 	status      string
 	started     bool
@@ -163,6 +166,71 @@ func ensureAudioLocked() {
 	player.SetBufferSize(100 * time.Millisecond)
 	player.Play()
 	session.audioPlayer = player
+}
+
+type ramCheat struct {
+	address uint32
+	value   uint32
+	width   int
+}
+
+// SetCheats configures repeating RAM-write cheats. Each non-empty line uses
+// ADDRESS=VALUE, where ADDRESS is an 8-digit hexadecimal Saturn address and
+// VALUE has 2, 4, or 8 hex digits (byte, word, or longword). Only Saturn work
+// RAM addresses are accepted; hardware registers and backup RAM are excluded.
+func SetCheats(source string) string {
+	var parsed []ramCheat
+	for lineNo, raw := range strings.Split(source, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		parts := strings.Split(line, "=")
+		if len(parts) != 2 {
+			return fmt.Sprintf("Cheat line %d: use ADDRESS=VALUE.", lineNo+1)
+		}
+		addressText := strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(parts[0]), "0X"))
+		valueText := strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(parts[1]), "0X"))
+		if len(addressText) < 1 || len(addressText) > 8 ||
+			(len(valueText) != 2 && len(valueText) != 4 && len(valueText) != 8) {
+			return fmt.Sprintf("Cheat line %d: address must be up to 8 hex digits and value must be 2, 4, or 8 digits.", lineNo+1)
+		}
+		address, err := strconv.ParseUint(addressText, 16, 32)
+		if err != nil {
+			return fmt.Sprintf("Cheat line %d: invalid hexadecimal address.", lineNo+1)
+		}
+		value, err := strconv.ParseUint(valueText, 16, 32)
+		if err != nil {
+			return fmt.Sprintf("Cheat line %d: invalid hexadecimal value.", lineNo+1)
+		}
+		width := len(valueText) / 2
+		addr := uint32(address) & 0x07FFFFFF
+		inRAM := (addr >= 0x00200000 && addr <= 0x002FFFFF) ||
+			(addr >= 0x06000000 && addr <= 0x07FFFFFF)
+		if !inRAM {
+			return fmt.Sprintf("Cheat line %d: only work-RAM addresses are supported.", lineNo+1)
+		}
+		if width > 1 && addr%uint32(width) != 0 {
+			return fmt.Sprintf("Cheat line %d: address is not aligned for this value width.", lineNo+1)
+		}
+		offset := addr & 0x000FFFFF
+		if offset+uint32(width) > 0x00100000 {
+			return fmt.Sprintf("Cheat line %d: write crosses a RAM boundary.", lineNo+1)
+		}
+		parsed = append(parsed, ramCheat{address: uint32(address), value: uint32(value), width: width})
+	}
+	session.Lock()
+	session.cheats = parsed
+	session.cheatSource = source
+	session.Unlock()
+	return fmt.Sprintf("Saved %d RAM cheat%s. Changes apply during gameplay.", len(parsed), map[bool]string{true: "", false: "s"}[len(parsed) == 1])
+}
+
+// GetCheats returns the currently configured cheat text for the frontend editor.
+func GetCheats() string {
+	session.Lock()
+	defer session.Unlock()
+	return session.cheatSource
 }
 
 // Dummy is exported so ebitenmobile can generate Java bindings for this package.
@@ -537,6 +605,9 @@ func (g *shell) Update() error {
 	defer session.Unlock()
 	if session.emu != nil && session.started {
 		ensureAudioLocked()
+		for _, cheat := range session.cheats {
+			_ = session.emu.ApplyRAMCheat(cheat.address, cheat.value, cheat.width)
+		}
 		session.emu.SetInput(0, session.buttons)
 		session.emu.RunFrame()
 		session.frameCount++
