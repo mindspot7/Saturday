@@ -226,6 +226,11 @@ func LoadDisc(path string) string {
 		}
 	}
 	emu.SetDisc(disc)
+	emu.SetOption("upscale", configuredUpscale)
+	emu.SetOption("fast_boot", fmt.Sprintf("%t", configuredFastBoot))
+	if err := emu.SetRendererByName(configuredRenderer); err != nil {
+		session.status = "Renderer fallback: " + err.Error()
+	}
 	if err := emu.Start(); err != nil {
 		_ = disc.Close()
 		session.status = "Boot error: " + err.Error()
@@ -238,6 +243,98 @@ func LoadDisc(path string) string {
 	session.frameCount = 0
 	session.status = "Running with built-in HLE BIOS: " + filepath.Base(path)
 	return ""
+}
+
+
+var (
+    configuredRenderer = "software"
+    configuredUpscale = "1x"
+    configuredFastBoot bool
+)
+
+// SetRenderer selects the active renderer: "software" or "gpu".
+func SetRenderer(name string) string {
+    session.Lock()
+    defer session.Unlock()
+    if name != "software" && name != "gpu" {
+        return "Unknown renderer. Choose software or gpu."
+    }
+    configuredRenderer = name
+    if session.emu != nil && session.started {
+        if err := session.emu.SetRendererByName(name); err != nil {
+            session.status = "Renderer fallback: " + err.Error()
+            return session.status
+        }
+    }
+    session.status = "Renderer: " + name
+    return ""
+}
+
+// SetUpscale selects a scale supported by the current core.
+func SetUpscale(name string) string {
+    session.Lock()
+    defer session.Unlock()
+    switch name {
+    case "1x", "2x", "4x", "8x", "16x":
+    default:
+        return "Unsupported scale. Choose 1x, 2x, 4x, 8x, or 16x."
+    }
+    configuredUpscale = name
+    if session.emu != nil && session.started {
+        if err := session.emu.SetUpscale(name); err != nil {
+            session.status = "Scale change failed: " + err.Error()
+            return session.status
+        }
+    }
+    session.status = "Internal resolution: " + name
+    return ""
+}
+
+// SetFastBoot toggles fast boot for the next game launch.
+// The built-in HLE BIOS already skips the retail BIOS animation.
+func SetFastBoot(enabled bool) {
+    session.Lock()
+    defer session.Unlock()
+    configuredFastBoot = enabled
+}
+
+// SwapDisc changes the inserted disc without rebuilding the emulator session.
+func SwapDisc(path string) string {
+    session.Lock()
+    defer session.Unlock()
+    if session.emu == nil || !session.started {
+        return "No game is currently running."
+    }
+    next, err := romloader.OpenDisc(path)
+    if err != nil {
+        return "Disc swap failed: " + err.Error()
+    }
+    old := session.disc
+    session.emu.SetDisc(next)
+    session.disc = next
+    if old != nil {
+        _ = old.Close()
+    }
+    session.status = "Disc inserted: " + filepath.Base(path)
+    return ""
+}
+
+// QuitGame stops the current session and releases its disc and renderer.
+func QuitGame() {
+    session.Lock()
+    defer session.Unlock()
+    if session.started && session.emu != nil {
+        session.emu.Close()
+    }
+    session.started = false
+    session.emu = nil
+    if session.disc != nil {
+        _ = session.disc.Close()
+        session.disc = nil
+    }
+    session.buttons = 0
+    session.frameCount = 0
+    session.status = "Game closed. Select a Saturn disc to begin."
 }
 
 // SetButton updates one physical Saturn control. Button IDs are: 0 up,
