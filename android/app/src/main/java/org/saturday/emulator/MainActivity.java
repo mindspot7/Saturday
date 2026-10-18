@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private Button menuButton;
     private LinearLayout gameListContainer;
     private LinearLayout recentListContainer;
+    private LinearLayout gameActions;
     private EditText searchInput;
     private final List<File> libraryDiscs = new ArrayList<>();
     private final Map<String, File> libraryCovers = new HashMap<>();
@@ -99,6 +100,28 @@ public final class MainActivity extends Activity {
         biosButton.setOnClickListener(v -> chooseBios());
         actions.addView(biosButton, new LinearLayout.LayoutParams(0, dp(48), 1));
         controlPanel.addView(actions);
+
+        gameActions = new LinearLayout(this);
+        gameActions.setOrientation(LinearLayout.HORIZONTAL);
+        Button settingsButton = new Button(this);
+        settingsButton.setText("Settings");
+        settingsButton.setAllCaps(false);
+        settingsButton.setOnClickListener(v -> showInGameSettings());
+        gameActions.addView(settingsButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+
+        Button swapButton = new Button(this);
+        swapButton.setText("Swap disc");
+        swapButton.setAllCaps(false);
+        swapButton.setOnClickListener(v -> showDiscSwapDialog());
+        gameActions.addView(swapButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+
+        Button quitButton = new Button(this);
+        quitButton.setText("Quit");
+        quitButton.setAllCaps(false);
+        quitButton.setOnClickListener(v -> confirmQuitGame());
+        gameActions.addView(quitButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+        gameActions.setVisibility(View.GONE);
+        controlPanel.addView(gameActions);
 
         TextView libraryTitle = new TextView(this);
         libraryTitle.setText("GAME LIBRARY");
@@ -178,6 +201,7 @@ public final class MainActivity extends Activity {
         menuParams.setMargins(0, dp(8), dp(8), 0);
         root.addView(menuButton, menuParams);
         setContentView(root);
+        Mobile.setFastBoot(getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false));
         restoreGameLibrary();
     }
 
@@ -568,11 +592,80 @@ public final class MainActivity extends Activity {
                 .apply();
     }
 
+    private void showInGameSettings() {
+        final String[] choices = {
+                "Renderer: Software",
+                "Renderer: GPU",
+                "Internal resolution: 1x",
+                "Internal resolution: 2x",
+                "Internal resolution: 4x",
+                "Internal resolution: 8x",
+                "Internal resolution: 16x",
+                "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off")
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Saturday settings")
+                .setItems(choices, (dialog, which) -> {
+                    String result = "";
+                    if (which == 0) result = Mobile.setRenderer("software");
+                    else if (which == 1) result = Mobile.setRenderer("gpu");
+                    else if (which >= 2 && which <= 6) {
+                        String[] scales = {"1x", "2x", "4x", "8x", "16x"};
+                        result = Mobile.setUpscale(scales[which - 2]);
+                    } else if (which == 7) {
+                        boolean enabled = !getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false);
+                        getPreferences(MODE_PRIVATE).edit().putBoolean("fast_boot", enabled).apply();
+                        Mobile.setFastBoot(enabled);
+                        result = "Fast boot " + (enabled ? "enabled" : "disabled")
+                                + ". It applies on the next game launch; HLE BIOS already skips the retail BIOS.";
+                    }
+                    statusView.setText(result == null || result.isEmpty() ? Mobile.getDiagnostics() : result);
+                })
+                .setNegativeButton("Close", null)
+                .show();
+    }
+
+    private void showDiscSwapDialog() {
+        if (libraryDiscs.isEmpty()) {
+            statusView.setText("Scan a game folder before swapping discs.");
+            return;
+        }
+        String[] titles = new String[libraryDiscs.size()];
+        for (int i = 0; i < libraryDiscs.size(); i++) titles[i] = libraryDiscs.get(i).getName();
+        new AlertDialog.Builder(this)
+                .setTitle("Insert disc")
+                .setItems(titles, (dialog, which) -> {
+                    File disc = libraryDiscs.get(which);
+                    String result = Mobile.swapDisc(disc.getAbsolutePath());
+                    statusView.setText(result == null || result.isEmpty() ? Mobile.getDiagnostics() : result);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmQuitGame() {
+        new AlertDialog.Builder(this)
+                .setTitle("Quit game?")
+                .setMessage("Close the current Saturn session?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Quit", (dialog, which) -> {
+                    Mobile.quitGame();
+                    gameRunning = false;
+                    uiHandler.removeCallbacks(diagnosticsUpdater);
+                    gameActions.setVisibility(View.GONE);
+                    controlPanel.setVisibility(View.VISIBLE);
+                    menuButton.setVisibility(View.GONE);
+                    statusView.setText(Mobile.getStatus());
+                })
+                .show();
+    }
+
     private void startGame(File disc) {
         String result = Mobile.loadDisc(disc.getAbsolutePath());
         gameRunning = result == null || result.isEmpty();
         statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
         if (gameRunning) {
+            gameActions.setVisibility(View.VISIBLE);
             rememberRecentGame(disc);
             renderRecentGames();
             controlPanel.setVisibility(View.GONE);
