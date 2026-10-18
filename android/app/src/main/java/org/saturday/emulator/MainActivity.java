@@ -29,6 +29,12 @@ import org.saturday.emulator.mobile.Mobile;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.HashMap;
@@ -37,6 +43,7 @@ import java.util.Map;
 public final class MainActivity extends Activity {
     private static final int REQUEST_GAME_FOLDER = 101;
     private static final int REQUEST_BIOS = 102;
+    private static final String BOXART_INDEX = "https://thumbnails.libretro.com/Sega%20-%20Saturn/Named_Boxarts/";
 
     private EbitenView ebitenView;
     private TextView statusView;
@@ -264,9 +271,11 @@ public final class MainActivity extends Activity {
         libraryDiscs.clear();
         libraryDiscs.addAll(discs);
         persistGameLibrary();
+        rebuildCoverIndex();
         renderGameLibrary();
         statusView.setText(discs.size() + " Saturn game" + (discs.size() == 1 ? "" : "s")
-                + " found. Select a title to start playing.");
+                + " found. Looking for cover art online...");
+        downloadMissingCovers();
     }
 
     private void persistGameLibrary() {
@@ -299,6 +308,15 @@ public final class MainActivity extends Activity {
 
     private void rebuildCoverIndex() {
         libraryCovers.clear();
+        File coverCache = new File(getCacheDir(), "covers");
+        if (coverCache.isDirectory()) {
+            File[] cached = coverCache.listFiles();
+            if (cached != null) for (File file : cached) {
+                if (file.isFile() && file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".png")) {
+                    libraryCovers.put(fileStem(file.getName()), file);
+                }
+            }
+        }
         java.util.Set<String> scanned = new java.util.HashSet<>();
         for (File disc : libraryDiscs) {
             File parent = disc.getParentFile();
@@ -314,6 +332,103 @@ public final class MainActivity extends Activity {
                 }
             }
         }
+    }
+
+    private void downloadMissingCovers() {
+        final List<File> missing = new ArrayList<>();
+        for (File disc : libraryDiscs) {
+            if (!libraryCovers.containsKey(fileStem(disc.getName()))) missing.add(disc);
+        }
+        if (missing.isEmpty()) {
+            statusView.setText("Cover art is already available for this library.");
+            return;
+        }
+        new Thread(() -> {
+            int downloaded = 0;
+            try {
+                String html = readText(new URL(BOXART_INDEX));
+                List<String> remoteNames = new ArrayList<>();
+                Matcher matcher = Pattern.compile("href=\\"([^\\"]+\\.png)\\\"", Pattern.CASE_INSENSITIVE).matcher(html);
+                while (matcher.find()) {
+                    String href = matcher.group(1);
+                    String decoded;
+                    try { decoded = URLDecoder.decode(href, "UTF-8"); }
+                    catch (Exception ignored) { decoded = href; }
+                    if (!decoded.startsWith("../")) remoteNames.add(href);
+                }
+                File coverCache = new File(getCacheDir(), "covers");
+                if (!coverCache.exists()) coverCache.mkdirs();
+                for (File disc : missing) {
+                    String key = normalizeCoverName(fileStem(disc.getName()));
+                    String best = null;
+                    int bestScore = Integer.MAX_VALUE;
+                    for (String href : remoteNames) {
+                        String remoteName;
+                        try { remoteName = URLDecoder.decode(href.substring(href.lastIndexOf('/') + 1), "UTF-8"); }
+                        catch (Exception ignored) { remoteName = href; }
+                        String remoteKey = normalizeCoverName(fileStem(remoteName));
+                        if (remoteKey.equals(key)) { best = href; bestScore = 0; break; }
+                        if (remoteKey.startsWith(key) && remoteKey.length() - key.length() < bestScore) {
+                            best = href;
+                            bestScore = remoteKey.length() - key.length();
+                        }
+                    }
+                    if (best == null) continue;
+                    File destination = new File(coverCache, fileStem(disc.getName()) + ".png");
+                    if (!destination.isFile() || destination.length() == 0) {
+                        URL imageUrl = new URL(new URL(BOXART_INDEX), best);
+                        HttpURLConnection connection = (HttpURLConnection) imageUrl.openConnection();
+                        connection.setConnectTimeout(8000);
+                        connection.setReadTimeout(12000);
+                        connection.setInstanceFollowRedirects(true);
+                        try (InputStream in = connection.getInputStream();
+                             FileOutputStream out = new FileOutputStream(destination)) {
+                            byte[] buffer = new byte[16 * 1024];
+                            int count;
+                            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                        } finally {
+                            connection.disconnect();
+                        }
+                    }
+                    if (destination.isFile() && destination.length() > 0) {
+                        synchronized (libraryCovers) { libraryCovers.put(fileStem(disc.getName()), destination); }
+                        downloaded++;
+                    }
+                }
+            } catch (Exception ignored) {
+                // The library remains usable when the image source is unavailable.
+            }
+            final int result = downloaded;
+            runOnUiThread(() -> {
+                renderGameLibrary();
+                statusView.setText(result > 0
+                        ? "Downloaded " + result + " cover" + (result == 1 ? "" : "s") + "."
+                        : "No matching online covers found. You can add local images beside the games.");
+            });
+        }, "Saturday-cover-downloader").start();
+    }
+
+    private String readText(URL url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(8000);
+        connection.setReadTimeout(12000);
+        connection.setRequestProperty("User-Agent", "Saturday-Android/1.0");
+        try (InputStream in = connection.getInputStream();
+             java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[16 * 1024];
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private String normalizeCoverName(String name) {
+        String lower = name.toLowerCase(java.util.Locale.ROOT);
+        lower = lower.replaceAll("\\(disc ?[0-9]+\\)", "");
+        lower = lower.replaceAll("\\(\\s*(usa|europe|european|japan|world|asia|korea|brazil|france|germany|italy|spain|sweden|australia)[^)]*\\)", "");
+        return lower.replaceAll("[^a-z0-9]", "");
     }
 
     private void renderGameLibrary() {
