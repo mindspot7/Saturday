@@ -166,6 +166,7 @@ public final class MainActivity extends Activity {
         menuParams.setMargins(0, dp(8), dp(8), 0);
         root.addView(menuButton, menuParams);
         setContentView(root);
+        restoreGameLibrary();
     }
 
     private void hideSystemUi() {
@@ -250,9 +251,37 @@ public final class MainActivity extends Activity {
         }
         libraryDiscs.clear();
         libraryDiscs.addAll(discs);
+        persistGameLibrary();
         renderGameLibrary();
         statusView.setText(discs.size() + " Saturn game" + (discs.size() == 1 ? "" : "s")
                 + " found. Select a title to start playing.");
+    }
+
+    private void persistGameLibrary() {
+        List<String> paths = new ArrayList<>();
+        for (File disc : libraryDiscs) paths.add(disc.getAbsolutePath());
+        getPreferences(MODE_PRIVATE).edit()
+                .putString("game_library_paths", android.text.TextUtils.join("\\n", paths))
+                .apply();
+    }
+
+    private void restoreGameLibrary() {
+        String saved = getPreferences(MODE_PRIVATE).getString("game_library_paths", "");
+        if (saved.isEmpty()) {
+            renderGameLibrary();
+            return;
+        }
+        libraryDiscs.clear();
+        for (String path : saved.split("\\n")) {
+            if (path.isEmpty()) continue;
+            File disc = new File(path);
+            if (disc.isFile()) libraryDiscs.add(disc);
+        }
+        renderGameLibrary();
+        if (!libraryDiscs.isEmpty()) {
+            statusView.setText(libraryDiscs.size() + " saved Saturn game"
+                    + (libraryDiscs.size() == 1 ? "" : "s") + " ready.");
+        }
     }
 
     private void renderGameLibrary() {
