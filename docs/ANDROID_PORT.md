@@ -16,7 +16,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - The framebuffer is sent to the Ebitengine screen. This is an initial software-rendering path; color format, scaling, frame pacing, and performance still need validation on hardware.
 - The native Activity provides a folder picker, copies the selected folder's files into app cache, and offers CHD/CUE selection. Copying all files together allows CUE references to sibling BIN tracks to resolve. The current importer scans only the selected folder's immediate children, not nested subfolders.
 - A BIOS can be selected separately and is copied to app cache. If no BIOS is selected, the core's HLE boot path is used where supported.
-- Physical d-pad/joystick axes, the standard Android A/B/X/Y face buttons, generic numbered buttons 1/2 for Saturn C/Z on compatible six-button pads, L1/L2 and R1/R2 for Saturn shoulders, and Start are mapped. Android controller button IDs vary by device, so the mappings still need validation and may need per-device remapping.
+- Physical d-pad/joystick axes, the standard Android A/B/X/Y face buttons, generic numbered buttons 1/2 for Saturn C/Z on compatible six-button pads, L1/L2 and R1/R2 for Saturn shoulders, and Start are mapped. The Settings menu now lets users remap supported physical key inputs to any Saturn button or disable them; mappings persist locally. Analog stick axes still use fixed thresholds and are not remappable.
 - The Activity hides Android system bars and suspends/resumes the Ebitengine view with lifecycle callbacks.
 - The library has text search, recently played entries, and automatic box-art lookup/download from the public Libretro thumbnails index. Cover download is best-effort and requires internet; local covers can be used if the online index has no match.
 - The in-game menu exposes renderer choice, internal scale (1x/2x/4x/8x/16x), aspect-correct 4:3 or stretch display, nearest/bilinear host scaling filter, fast boot, disc swap, and quit. Renderer, scale, display mode, texture filter, and fast-boot preferences are saved locally.
@@ -28,7 +28,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - Android UI-to-Go binding names and the full AAR/APK build must pass CI before the native frontend is considered build-verified.
 - CHD and CUE/BIN loading is implemented but not yet tested with actual user content on an Android device.
 - The mobile frontend now feeds the core's interleaved 44.1 kHz stereo PCM into Ebitengine audio through a bounded ring buffer. If emulation gets ahead, old samples are dropped rather than blocking the frame loop; if the audio reader gets ahead, silence fills the gap. Audible output, latency, lifecycle behavior, and sustained synchronization still require physical-device testing.
-- Full save states, controller remapping, cheat support, shader effects, and built-in widescreen patches are not implemented. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
+- Full save states, cheat support, shader effects, and built-in widescreen patches are not implemented. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
 - The scale list is limited by the core's current power-of-two scaling model; 3x and 5x require a core renderer change, not just extra menu entries.
 - The GPU renderer selection is exposed by the frontend, but Android GPU backend availability and performance are not yet verified; software remains the compatibility fallback.
 - There is no physical-device smoke test for this latest settings build. A successful compile is not evidence of playable performance.
@@ -68,6 +68,7 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 - [x] Confirm CI passes for the integrated mobile frontend and native UI at commit `5371bd3d32f2327007e823463ab4ce7c1571927f`.
 - [ ] Install and test the latest APK.
 - [ ] Validate controls, audio, lifecycle, and performance on a physical handheld.
+- [x] Add configurable mappings for supported physical controller buttons.
 - [x] Add game-library search, recent games, and best-effort automatic box-art retrieval.
 - [x] Add in-game renderer, scaling, display mode, texture filter, fast boot, disc swap, and quit actions.
 - [x] Persist renderer, upscale, display, texture filter, and fast-boot preferences locally.
