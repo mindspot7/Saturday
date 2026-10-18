@@ -20,7 +20,8 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - The Activity hides Android system bars and suspends/resumes the Ebitengine view with lifecycle callbacks.
 - The library has text search, recently played entries, and automatic box-art lookup/download from the public Libretro thumbnails index. Cover download is best-effort and requires internet; local covers can be used if the online index has no match.
 - The in-game menu exposes renderer choice, internal scale (1x/2x/4x/8x/16x), aspect-correct 4:3 or stretch display, nearest/bilinear host scaling filter, fast boot, disc swap, and quit. Renderer, scale, display mode, texture filter, and fast-boot preferences are saved locally.
-- The Saturn's 32 KB internal backup RAM is restored from an app-private file at launch and written atomically on pause/quit/disc replacement, plus periodically during play. This is game save-memory persistence, not a save state; it does not capture CPU, video, audio, or other live machine state.
+- The Saturn's 32 KB internal backup RAM is restored from an app-private file at launch and written atomically on pause/quit/disc replacement, plus periodically during play.
+- Complete save states are exposed in the in-game Settings menu. They serialize the core's CPU, video, audio, memory and CD subsystem state, are stored privately per game, and require the same disc identity and BIOS mode to load. If deserialization fails after validation begins, the session is stopped rather than continuing with possibly inconsistent state.
 - No virtual on-screen controls, BIOS images, or game images are included.
 
 ## Known limitations
@@ -28,7 +29,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - Android UI-to-Go binding names and the full AAR/APK build must pass CI before the native frontend is considered build-verified.
 - CHD and CUE/BIN loading is implemented but not yet tested with actual user content on an Android device.
 - The mobile frontend now feeds the core's interleaved 44.1 kHz stereo PCM into Ebitengine audio through a bounded ring buffer. If emulation gets ahead, old samples are dropped rather than blocking the frame loop; if the audio reader gets ahead, silence fills the gap. Audible output, latency, lifecycle behavior, and sustained synchronization still require physical-device testing.
-- Full save states, cheat support, shader effects, and built-in widescreen patches are not implemented. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
+- Cheat support, shader effects, and built-in widescreen patches are not implemented. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
 - The scale list is limited by the core's current power-of-two scaling model; 3x and 5x require a core renderer change, not just extra menu entries.
 - The GPU renderer selection is exposed by the frontend, but Android GPU backend availability and performance are not yet verified; software remains the compatibility fallback.
 - There is no physical-device smoke test for this latest settings build. A successful compile is not evidence of playable performance.
@@ -44,7 +45,7 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 ## Remaining milestones
 
 1. **Device validation:** install the latest CI APK on an Android handheld and test CHD/CUE/BIN, optional BIOS, physical controls, audio, pause/resume, and sustained frame pacing.
-2. **Persistence and reliability:** test backup-RAM persistence against real games; investigate full save-state serialization separately; test library restoration and controller disconnect/reconnect.
+2. **Persistence and reliability:** test backup-RAM persistence and complete save/load states against real games; test library restoration and controller disconnect/reconnect.
 3. **Graphics:** benchmark software and GPU paths on actual devices. Investigate the feasibility of 3x/5x rendering, post-processing shaders, JINC2/xBR filters, and Android backend choices without presenting unsupported APIs as available.
 4. **Game enhancements:** design a safe cheat interface around core memory access, then add tested cheat formats and game-specific widescreen patches.
 5. **Release:** document installation, supported formats, BIOS expectations, and known limitations.
@@ -73,3 +74,5 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 - [x] Add in-game renderer, scaling, display mode, texture filter, fast boot, disc swap, and quit actions.
 - [x] Persist renderer, upscale, display, texture filter, and fast-boot preferences locally.
 - [x] Add app-private Saturn backup-RAM persistence with periodic and lifecycle saves.
+- [x] Expose complete core save states through the Android in-game Settings menu.
+- [x] Add configurable mappings for supported physical controller buttons.
