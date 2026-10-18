@@ -55,6 +55,9 @@ var session struct {
 	emu         *core.Emulator
 	disc        *romloader.Disc
 	bios        []byte
+	backupPath  string
+	backupRAM   []byte
+	lastBackupFrame uint64
 	buttons     uint32
 	status      string
 	started     bool
@@ -190,6 +193,51 @@ func LoadBIOS(path string) string {
 // For CUE images, the referenced BIN files must remain beside the CUE file.
 // The caller should copy the CUE and all referenced track files into one
 // app-cache directory before calling this function.
+// SetBackupRAMPath configures the app-private Saturn backup-RAM file and
+// restores it for the next emulator instance. Invalid or missing files are
+// ignored, leaving the core's freshly formatted 32 KB backup RAM in place.
+func SetBackupRAMPath(path string) {
+	session.Lock()
+	defer session.Unlock()
+	session.backupPath = strings.TrimSpace(path)
+	session.backupRAM = nil
+	if session.backupPath == "" {
+		return
+	}
+	data, err := os.ReadFile(session.backupPath)
+	if err == nil && len(data) == 32*1024 {
+		session.backupRAM = data
+	}
+}
+
+// SaveBackupRAM flushes the current internal backup RAM to the configured
+// app-private file. It is safe to call when no game is running.
+func SaveBackupRAM() {
+	session.Lock()
+	defer session.Unlock()
+	persistBackupRAMLocked()
+}
+
+func persistBackupRAMLocked() {
+	if session.backupPath == "" || session.emu == nil || !session.started {
+		return
+	}
+	data := session.emu.GetSRAM()
+	if len(data) != 32*1024 {
+		return
+	}
+	tmp := session.backupPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, session.backupPath); err != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	session.backupRAM = data
+	session.lastBackupFrame = session.frameCount
+}
+
 func LoadDisc(path string) string {
 	session.Lock()
 	defer session.Unlock()
@@ -209,6 +257,7 @@ func LoadDisc(path string) string {
 	}
 
 	if session.started && session.emu != nil {
+		persistBackupRAMLocked()
 		session.emu.Close()
 		session.started = false
 	}
@@ -218,6 +267,9 @@ func LoadDisc(path string) string {
 	}
 
 	emu := core.NewEmulator()
+	if len(session.backupRAM) == 32*1024 {
+		emu.SetSRAM(session.backupRAM)
+	}
 	if len(session.bios) != 0 {
 		if err := emu.SetBIOS("main_bios", session.bios); err != nil {
 			_ = disc.Close()
@@ -241,6 +293,7 @@ func LoadDisc(path string) string {
 	session.disc = disc
 	session.started = true
 	session.frameCount = 0
+	session.lastBackupFrame = 0
 	session.status = "Running with built-in HLE BIOS: " + filepath.Base(path)
 	return ""
 }
@@ -349,6 +402,7 @@ func SwapDisc(path string) string {
 func QuitGame() {
     session.Lock()
     defer session.Unlock()
+    persistBackupRAMLocked()
     if session.started && session.emu != nil {
         session.emu.Close()
     }
@@ -418,6 +472,12 @@ func (g *shell) Update() error {
 		session.emu.SetInput(0, session.buttons)
 		session.emu.RunFrame()
 		session.frameCount++
+		// Persist every 600 frames (~10 seconds at 60 Hz) so abrupt exits
+		// lose at most a short window of progress; explicit lifecycle/quit
+		// saves flush immediately.
+		if session.backupPath != "" && session.frameCount-session.lastBackupFrame >= 600 {
+			persistBackupRAMLocked()
+		}
 		if session.audioStream != nil {
 			session.audioStream.Push(session.emu.GetAudioSamples())
 		}
