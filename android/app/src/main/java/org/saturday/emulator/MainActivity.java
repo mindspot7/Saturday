@@ -599,14 +599,13 @@ public final class MainActivity extends Activity {
 
     private void showInGameSettings() {
         final String[] choices = {
-                "Renderer: " + getPreferences(MODE_PRIVATE).getString("renderer", "software"),
-                "Switch renderer to " + (getPreferences(MODE_PRIVATE).getString("renderer", "software").equals("software") ? "GPU" : "Software"),
-                "Internal resolution: " + getPreferences(MODE_PRIVATE).getString("upscale", "1x") + " (tap to choose)",
-                "Set internal resolution: 1x",
-                "Set internal resolution: 2x",
-                "Set internal resolution: 4x",
-                "Set internal resolution: 8x",
-                "Set internal resolution: 16x",
+                "Renderer: Software" + (getPreferences(MODE_PRIVATE).getString("renderer", "software").equals("software") ? " ✓" : ""),
+                "Renderer: GPU" + (getPreferences(MODE_PRIVATE).getString("renderer", "software").equals("gpu") ? " ✓" : ""),
+                "Internal resolution: 1x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("1x") ? " ✓" : ""),
+                "Internal resolution: 2x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("2x") ? " ✓" : ""),
+                "Internal resolution: 4x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("4x") ? " ✓" : ""),
+                "Internal resolution: 8x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("8x") ? " ✓" : ""),
+                "Internal resolution: 16x" + (getPreferences(MODE_PRIVATE).getString("upscale", "1x").equals("16x") ? " ✓" : ""),
                 "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
                 "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off")
@@ -617,26 +616,25 @@ public final class MainActivity extends Activity {
                     String result = "";
                     android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
                     if (which == 0 || which == 1) {
-                        String current = prefs.getString("renderer", "software");
-                        String next = current.equals("software") ? "gpu" : "software";
+                        String next = which == 0 ? "software" : "gpu";
                         result = Mobile.setRenderer(next);
                         if (result == null || result.isEmpty()) prefs.edit().putString("renderer", next).apply();
-                    } else if (which >= 2 && which <= 7) {
-                        String[] scales = {"1x", "1x", "2x", "4x", "8x", "16x"};
+                    } else if (which >= 2 && which <= 6) {
+                        String[] scales = {"1x", "2x", "4x", "8x", "16x"};
                         String next = scales[which - 2];
                         result = Mobile.setUpscale(next);
                         if (result == null || result.isEmpty()) prefs.edit().putString("upscale", next).apply();
-                    } else if (which == 8) {
+                    } else if (which == 7) {
                         String current = prefs.getString("display_mode", "4:3");
                         String next = current.equals("4:3") ? "stretch" : "4:3";
                         prefs.edit().putString("display_mode", next).apply();
                         result = Mobile.setDisplayMode(next);
-                    } else if (which == 9) {
+                    } else if (which == 8) {
                         String current = prefs.getString("texture_filter", "nearest");
                         String next = current.equals("nearest") ? "bilinear" : "nearest";
                         prefs.edit().putString("texture_filter", next).apply();
                         result = Mobile.setTextureFilter(next);
-                    } else if (which == 10) {
+                    } else if (which == 9) {
                         boolean enabled = !prefs.getBoolean("fast_boot", false);
                         prefs.edit().putBoolean("fast_boot", enabled).apply();
                         Mobile.setFastBoot(enabled);
