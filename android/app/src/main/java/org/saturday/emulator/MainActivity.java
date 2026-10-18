@@ -34,12 +34,14 @@ public final class MainActivity extends Activity {
 
     private EbitenView ebitenView;
     private TextView statusView;
+    private LinearLayout controlPanel;
+    private Button menuButton;
     private File gameDirectory;
     private boolean gameRunning;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable diagnosticsUpdater = new Runnable() {
         @Override public void run() {
-            if (gameRunning && statusView != null) {
+            if (gameRunning && statusView != null && controlPanel != null\n                    && controlPanel.getVisibility() == View.VISIBLE) {
                 statusView.setText(Mobile.getDiagnostics());
                 uiHandler.postDelayed(this, 1000);
             }
@@ -59,35 +61,61 @@ public final class MainActivity extends Activity {
         root.addView(ebitenView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
 
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(10), dp(8), dp(10), dp(8));
-        panel.setBackgroundColor(0xCC101722);
+        controlPanel = new LinearLayout(this);
+        controlPanel.setOrientation(LinearLayout.VERTICAL);
+        controlPanel.setPadding(dp(14), dp(10), dp(14), dp(10));
+        controlPanel.setBackgroundColor(0xEE111827);
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
         Button gamesButton = new Button(this);
-        gamesButton.setText("Choose game folder");
+        gamesButton.setText("Choose games");
+        gamesButton.setAllCaps(false);
         gamesButton.setOnClickListener(v -> chooseGameFolder());
         actions.addView(gamesButton, new LinearLayout.LayoutParams(0, dp(48), 1));
 
         Button biosButton = new Button(this);
-        biosButton.setText("Optional BIOS");
+        biosButton.setText("BIOS (optional)");
+        biosButton.setAllCaps(false);
         biosButton.setOnClickListener(v -> chooseBios());
         actions.addView(biosButton, new LinearLayout.LayoutParams(0, dp(48), 1));
-        panel.addView(actions);
+        controlPanel.addView(actions);
 
         statusView = new TextView(this);
         statusView.setTextColor(0xFFFFFFFF);
         statusView.setTextSize(13);
+        statusView.setLineSpacing(dp(3), 1.0f);
         statusView.setPadding(dp(4), dp(4), dp(4), dp(2));
         statusView.setText("SATURDAY · SEGA SATURN\n\nBuilt-in HLE BIOS is enabled automatically. An external BIOS is optional.\n\nChoose a folder containing CHD or CUE/BIN files.");
-        panel.addView(statusView);
+        controlPanel.addView(statusView);
 
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
         panelParams.gravity = android.view.Gravity.TOP;
-        root.addView(panel, panelParams);
+        root.addView(controlPanel, panelParams);
+
+        menuButton = new Button(this);
+        menuButton.setText("MENU");
+        menuButton.setAllCaps(false);
+        menuButton.setTextSize(12);
+        menuButton.setVisibility(View.GONE);
+        menuButton.setOnClickListener(v -> {
+            boolean show = controlPanel.getVisibility() != View.VISIBLE;
+            controlPanel.setVisibility(show ? View.VISIBLE : View.GONE);
+            menuButton.setText(show ? "HIDE" : "MENU");
+            if (show && gameRunning) {
+                statusView.setText(Mobile.getDiagnostics());
+                uiHandler.removeCallbacks(diagnosticsUpdater);
+                uiHandler.postDelayed(diagnosticsUpdater, 1000);
+            } else {
+                uiHandler.removeCallbacks(diagnosticsUpdater);
+            }
+        });
+        FrameLayout.LayoutParams menuParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, dp(44));
+        menuParams.gravity = android.view.Gravity.TOP | android.view.Gravity.END;
+        menuParams.setMargins(0, dp(8), dp(8), 0);
+        root.addView(menuButton, menuParams);
         setContentView(root);
     }
 
@@ -179,7 +207,12 @@ public final class MainActivity extends Activity {
                     String result = Mobile.loadDisc(discs.get(which).getAbsolutePath());
                     gameRunning = result == null || result.isEmpty();
                     statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
-                    if (gameRunning) uiHandler.postDelayed(diagnosticsUpdater, 1000);
+                    if (gameRunning) {
+                        controlPanel.setVisibility(View.GONE);
+                        menuButton.setVisibility(View.VISIBLE);
+                        menuButton.setText("MENU");
+                        uiHandler.removeCallbacks(diagnosticsUpdater);
+                    }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -258,6 +291,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         hideSystemUi();
         if (ebitenView != null) ebitenView.resumeGame();
-        if (gameRunning) uiHandler.postDelayed(diagnosticsUpdater, 1000);
+        if (gameRunning && controlPanel != null && controlPanel.getVisibility() == View.VISIBLE)
+            uiHandler.postDelayed(diagnosticsUpdater, 1000);
     }
 }
