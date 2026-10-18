@@ -22,6 +22,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - The in-game menu exposes renderer choice, internal scale (1x/2x/4x/8x/16x), aspect-correct 4:3 or stretch display, nearest/bilinear host scaling filter, fast boot, disc swap, and quit. Renderer, scale, display mode, texture filter, and fast-boot preferences are saved locally.
 - The Saturn's 32 KB internal backup RAM is restored from an app-private file at launch and written atomically on pause/quit/disc replacement, plus periodically during play.
 - Complete save states are exposed in the in-game Settings menu. They serialize the core's CPU, video, audio, memory and CD subsystem state, are stored privately per game, and require the same disc identity and BIOS mode to load. If deserialization fails after validation begins, the session is stopped rather than continuing with possibly inconsistent state.
+- The Settings menu includes repeating RAM cheats in `ADDRESS=VALUE` hexadecimal format. Values of 2, 4, or 8 hex digits perform byte, word, or longword writes on every frame. For safety, only work RAM is accepted; hardware registers, BIOS and backup RAM are rejected. This is a minimal raw-RAM format, not a GameShark/Action Replay code decoder.
 - No virtual on-screen controls, BIOS images, or game images are included.
 
 ## Known limitations
@@ -29,7 +30,7 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - Android UI-to-Go binding names and the full AAR/APK build must pass CI before the native frontend is considered build-verified.
 - CHD and CUE/BIN loading is implemented but not yet tested with actual user content on an Android device.
 - The mobile frontend now feeds the core's interleaved 44.1 kHz stereo PCM into Ebitengine audio through a bounded ring buffer. If emulation gets ahead, old samples are dropped rather than blocking the frame loop; if the audio reader gets ahead, silence fills the gap. Audible output, latency, lifecycle behavior, and sustained synchronization still require physical-device testing.
-- Cheat support, shader effects, and built-in widescreen patches are not implemented. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
+- GameShark/Action Replay code decoding, shader effects, and built-in widescreen patches are not implemented. The current cheat editor supports raw work-RAM writes only. Backup-RAM persistence is implemented, but has not yet been verified against actual games on hardware.
 - The scale list is limited by the core's current power-of-two scaling model; 3x and 5x require a core renderer change, not just extra menu entries.
 - The GPU renderer selection is exposed by the frontend, but Android GPU backend availability and performance are not yet verified; software remains the compatibility fallback.
 - There is no physical-device smoke test for this latest settings build. A successful compile is not evidence of playable performance.
@@ -47,7 +48,7 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 1. **Device validation:** install the latest CI APK on an Android handheld and test CHD/CUE/BIN, optional BIOS, physical controls, audio, pause/resume, and sustained frame pacing.
 2. **Persistence and reliability:** test backup-RAM persistence and complete save/load states against real games; test library restoration and controller disconnect/reconnect.
 3. **Graphics:** benchmark software and GPU paths on actual devices. Investigate the feasibility of 3x/5x rendering, post-processing shaders, JINC2/xBR filters, and Android backend choices without presenting unsupported APIs as available.
-4. **Game enhancements:** design a safe cheat interface around core memory access, then add tested cheat formats and game-specific widescreen patches.
+4. **Game enhancements:** add tested GameShark/Action Replay code formats, shader effects, and game-specific widescreen patches.
 5. **Release:** document installation, supported formats, BIOS expectations, and known limitations.
 
 ## Acceptance checks
@@ -70,6 +71,8 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 - [ ] Install and test the latest APK.
 - [ ] Validate controls, audio, lifecycle, and performance on a physical handheld.
 - [x] Add configurable mappings for supported physical controller buttons.
+- [x] Expose complete save states in the Android frontend.
+- [x] Add validated repeating work-RAM cheat writes and an editor.
 - [x] Add game-library search, recent games, and best-effort automatic box-art retrieval.
 - [x] Add in-game renderer, scaling, display mode, texture filter, fast boot, disc swap, and quit actions.
 - [x] Persist renderer, upscale, display, texture filter, and fast-boot preferences locally.
