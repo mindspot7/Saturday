@@ -56,6 +56,7 @@ public final class MainActivity extends Activity {
     private final List<File> libraryDiscs = new ArrayList<>();
     private final Map<String, File> libraryCovers = new HashMap<>();
     private File gameDirectory;
+    private File currentGame;
     private boolean gameRunning;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable diagnosticsUpdater = new Runnable() {
@@ -610,7 +611,9 @@ public final class MainActivity extends Activity {
                 "Display: " + getPreferences(MODE_PRIVATE).getString("display_mode", "4:3"),
                 "Texture filter: " + getPreferences(MODE_PRIVATE).getString("texture_filter", "nearest"),
                 "Fast boot: " + (getPreferences(MODE_PRIVATE).getBoolean("fast_boot", false) ? "On" : "Off"),
-                "Controller mapping…"
+                "Controller mapping…",
+                "Save state now",
+                "Load state…"
         };
         new AlertDialog.Builder(this)
                 .setTitle("Saturday settings")
@@ -645,6 +648,26 @@ public final class MainActivity extends Activity {
                     } else if (which == 10) {
                         showControllerMappingDialog();
                         return;
+                    } else if (which == 11) {
+                        File stateFile = currentStateFile();
+                        result = stateFile == null ? "Start a game before saving a state."
+                                : Mobile.saveState(stateFile.getAbsolutePath());
+                    } else if (which == 12) {
+                        File stateFile = currentStateFile();
+                        if (stateFile == null) {
+                            result = "Start the matching game before loading a state.";
+                        } else if (!stateFile.isFile()) {
+                            result = "No save state exists for this game yet.";
+                        } else {
+                            result = Mobile.loadState(stateFile.getAbsolutePath());
+                            if (result != null && result.startsWith("Save state rejected")) {
+                                gameRunning = false;
+                                gameActions.setVisibility(View.GONE);
+                                controlPanel.setVisibility(View.VISIBLE);
+                                menuButton.setVisibility(View.GONE);
+                                uiHandler.removeCallbacks(diagnosticsUpdater);
+                            }
+                        }
                     }
                     statusView.setText(result == null || result.isEmpty() ? Mobile.getDiagnostics() : result);
                 })
@@ -703,6 +726,15 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private File currentStateFile() {
+        if (currentGame == null) return null;
+        File directory = new File(getFilesDir(), "states");
+        if (!directory.exists() && !directory.mkdirs()) return null;
+        String stem = fileStem(currentGame.getName()).replaceAll("[^a-z0-9._-]", "_");
+        String pathKey = Integer.toHexString(currentGame.getAbsolutePath().hashCode());
+        return new File(directory, stem + "-" + pathKey + ".state");
+    }
+
     private void showDiscSwapDialog() {
         if (libraryDiscs.isEmpty()) {
             statusView.setText("Scan a game folder before swapping discs.");
@@ -741,6 +773,7 @@ public final class MainActivity extends Activity {
     private void startGame(File disc) {
         String result = Mobile.loadDisc(disc.getAbsolutePath());
         gameRunning = result == null || result.isEmpty();
+        if (gameRunning) currentGame = disc;
         statusView.setText(gameRunning ? Mobile.getDiagnostics() : result);
         if (gameRunning) {
             gameActions.setVisibility(View.VISIBLE);
