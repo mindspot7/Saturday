@@ -75,4 +75,3 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 - [x] Persist renderer, upscale, display, texture filter, and fast-boot preferences locally.
 - [x] Add app-private Saturn backup-RAM persistence with periodic and lifecycle saves.
 - [x] Expose complete core save states through the Android in-game Settings menu.
-- [x] Add configurable mappings for supported physical controller buttons.
