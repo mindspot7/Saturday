@@ -18,6 +18,8 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - A BIOS can be selected separately and is copied to app cache. If no BIOS is selected, the core's HLE boot path is used where supported.
 - Physical d-pad/joystick axes, the standard Android A/B/X/Y face buttons, generic numbered buttons 1/2 for Saturn C/Z on compatible six-button pads, L1/L2 and R1/R2 for Saturn shoulders, and Start are mapped. Android controller button IDs vary by device, so the mappings still need validation and may need per-device remapping.
 - The Activity hides Android system bars and suspends/resumes the Ebitengine view with lifecycle callbacks.
+- The library has text search, recently played entries, and automatic box-art lookup/download from the public Libretro thumbnails index. Cover download is best-effort and requires internet; local covers can be used if the online index has no match.
+- The in-game menu exposes renderer choice, internal scale (1x/2x/4x/8x/16x), aspect-correct 4:3 or stretch display, nearest/bilinear host scaling filter, fast boot, disc swap, and quit. Renderer, scale, display mode, texture filter, and fast-boot preferences are saved locally.
 - No virtual on-screen controls, BIOS images, or game images are included.
 
 ## Known limitations
@@ -25,8 +27,10 @@ This document tracks the Android handheld port of erings (Saturday fork).
 - Android UI-to-Go binding names and the full AAR/APK build must pass CI before the native frontend is considered build-verified.
 - CHD and CUE/BIN loading is implemented but not yet tested with actual user content on an Android device.
 - The mobile frontend now feeds the core's interleaved 44.1 kHz stereo PCM into Ebitengine audio through a bounded ring buffer. If emulation gets ahead, old samples are dropped rather than blocking the frame loop; if the audio reader gets ahead, silence fills the gap. Audible output, latency, lifecycle behavior, and sustained synchronization still require physical-device testing.
-- Save states, persistent game-library metadata, BIOS management UI, pause/menu actions, controller remapping, and Android-specific graphics acceleration are not yet implemented.
-- There is no physical-device smoke test yet. A successful compile is not evidence of playable performance.
+- Save states, controller remapping, cheat support, shader effects, and built-in widescreen patches are not implemented.
+- The scale list is limited by the core's current power-of-two scaling model; 3x and 5x require a core renderer change, not just extra menu entries.
+- The GPU renderer selection is exposed by the frontend, but Android GPU backend availability and performance are not yet verified; software remains the compatibility fallback.
+- There is no physical-device smoke test for this latest settings build. A successful compile is not evidence of playable performance.
 
 ## Automated Android build checks
 
@@ -38,12 +42,11 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 
 ## Remaining milestones
 
-1. **Build verification:** ensure the integrated Go binding, Java API calls, Gradle project, and APK all build in CI.
-2. **Controller-first frontend:** cover face buttons, shoulders/triggers, Start/Select, analog and d-pad input, plus controller disconnect/reconnect and remapping.
-3. **Display and lifecycle:** validate aspect ratio, scaling, frame pacing, Android pause/resume, and audio lifecycle.
-4. **Content and persistence:** test CHD/CUE/BIN and BIOS selection on device; add persistent library and save-state management.
-5. **Graphics and performance:** benchmark representative games on handheld hardware, then enable and validate an Android-capable GPU backend if practical.
-6. **Release:** document installation, supported formats, BIOS expectations, and known limitations.
+1. **Device validation:** install the latest CI APK on an Android handheld and test CHD/CUE/BIN, optional BIOS, physical controls, audio, pause/resume, and sustained frame pacing.
+2. **Persistence and reliability:** implement save states and backup-RAM persistence; test library restoration and controller disconnect/reconnect.
+3. **Graphics:** benchmark software and GPU paths on actual devices. Investigate the feasibility of 3x/5x rendering, post-processing shaders, JINC2/xBR filters, and Android backend choices without presenting unsupported APIs as available.
+4. **Game enhancements:** design a safe cheat interface around core memory access, then add tested cheat formats and game-specific widescreen patches.
+5. **Release:** document installation, supported formats, BIOS expectations, and known limitations.
 
 ## Acceptance checks
 
@@ -64,3 +67,6 @@ The initial core compile attempt failed because `CGO_ENABLED=0` was incompatible
 - [x] Confirm CI passes for the integrated mobile frontend and native UI at commit `5371bd3d32f2327007e823463ab4ce7c1571927f`.
 - [ ] Install and test the latest APK.
 - [ ] Validate controls, audio, lifecycle, and performance on a physical handheld.
+- [x] Add game-library search, recent games, and best-effort automatic box-art retrieval.
+- [x] Add in-game renderer, scaling, display mode, texture filter, fast boot, disc swap, and quit actions.
+- [x] Persist renderer, upscale, display, texture filter, and fast-boot preferences locally.
