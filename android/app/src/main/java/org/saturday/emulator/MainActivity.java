@@ -41,7 +41,8 @@ public final class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable diagnosticsUpdater = new Runnable() {
         @Override public void run() {
-            if (gameRunning && statusView != null && controlPanel != null\n                    && controlPanel.getVisibility() == View.VISIBLE) {
+            if (gameRunning && statusView != null && controlPanel != null
+                    && controlPanel.getVisibility() == View.VISIBLE) {
                 statusView.setText(Mobile.getDiagnostics());
                 uiHandler.postDelayed(this, 1000);
             }
