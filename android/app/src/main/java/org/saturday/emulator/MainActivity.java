@@ -301,25 +301,24 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private List<String> loadRecentPaths() {
+        String saved = getPreferences(MODE_PRIVATE).getString("recent_games_paths", "");
+        List<String> paths = new ArrayList<>();
+        if (saved.isEmpty()) return paths;
+        for (String path : saved.split("\\n")) {
+            if (!path.isEmpty()) paths.add(path);
+        }
+        return paths;
+    }
+
     private void renderRecentGames() {
         if (recentListContainer == null) return;
         recentListContainer.removeAllViews();
         java.util.Set<String> available = new java.util.HashSet<>();
         for (File disc : libraryDiscs) available.add(disc.getAbsolutePath());
-        java.util.List<String> recent = getPreferences(MODE_PRIVATE)
-                .getStringSet("recent_games", java.util.Collections.<String>emptySet())
-                .stream().filter(available::contains).limit(3)
-                .collect(java.util.stream.Collectors.toList());
-        if (recent.isEmpty()) {
-            TextView empty = new TextView(this);
-            empty.setText("Your recently played games will appear here.");
-            empty.setTextColor(0xFFD1D5DB);
-            empty.setTextSize(12);
-            empty.setPadding(dp(8), dp(2), dp(8), dp(6));
-            recentListContainer.addView(empty);
-            return;
-        }
-        for (String path : recent) {
+        int shown = 0;
+        for (String path : loadRecentPaths()) {
+            if (!available.contains(path)) continue;
             File disc = new File(path);
             Button recentButton = new Button(this);
             recentButton.setText("▶  " + disc.getName());
@@ -329,16 +328,28 @@ public final class MainActivity extends Activity {
             recentButton.setOnClickListener(v -> startGame(disc));
             recentListContainer.addView(recentButton, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+            if (++shown == 3) break;
+        }
+        if (shown == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("Your recently played games will appear here.");
+            empty.setTextColor(0xFFD1D5DB);
+            empty.setTextSize(12);
+            empty.setPadding(dp(8), dp(2), dp(8), dp(6));
+            recentListContainer.addView(empty);
         }
     }
 
     private void rememberRecentGame(File disc) {
-        java.util.LinkedHashSet<String> recent = new java.util.LinkedHashSet<>();
-        recent.add(disc.getAbsolutePath());
-        recent.addAll(getPreferences(MODE_PRIVATE).getStringSet(
-                "recent_games", java.util.Collections.<String>emptySet()));
-        while (recent.size() > 10) recent.remove(recent.iterator().next());
-        getPreferences(MODE_PRIVATE).edit().putStringSet("recent_games", recent).apply();
+        List<String> recent = new ArrayList<>();
+        String path = disc.getAbsolutePath();
+        recent.add(path);
+        for (String oldPath : loadRecentPaths()) {
+            if (!oldPath.equals(path) && recent.size() < 10) recent.add(oldPath);
+        }
+        getPreferences(MODE_PRIVATE).edit()
+                .putString("recent_games_paths", android.text.TextUtils.join("\\n", recent))
+                .apply();
     }
 
     private void startGame(File disc) {
