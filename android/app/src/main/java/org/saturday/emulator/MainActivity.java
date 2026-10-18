@@ -71,6 +71,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Mobile.setBackupRAMPath(new File(getFilesDir(), "saturn-backup.ram").getAbsolutePath());
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -761,6 +762,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         uiHandler.removeCallbacks(diagnosticsUpdater);
+        Mobile.saveBackupRAM();
         if (ebitenView != null) ebitenView.suspendGame();
         super.onPause();
     }
