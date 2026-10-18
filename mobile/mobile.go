@@ -250,6 +250,8 @@ var (
     configuredRenderer = "software"
     configuredUpscale = "1x"
     configuredFastBoot bool
+    configuredDisplayMode = "4:3"
+    configuredTextureFilter = "nearest"
 )
 
 // SetRenderer selects the active renderer: "software" or "gpu".
@@ -287,6 +289,30 @@ func SetUpscale(name string) string {
         }
     }
     session.status = "Internal resolution: " + name
+    return ""
+}
+
+// SetDisplayMode switches between aspect-correct 4:3 and full-screen stretch.
+func SetDisplayMode(name string) string {
+    session.Lock()
+    defer session.Unlock()
+    if name != "4:3" && name != "stretch" {
+        return "Unknown display mode. Choose 4:3 or stretch."
+    }
+    configuredDisplayMode = name
+    session.status = "Display mode: " + name
+    return ""
+}
+
+// SetTextureFilter selects the host texture sampling filter.
+func SetTextureFilter(name string) string {
+    session.Lock()
+    defer session.Unlock()
+    if name != "nearest" && name != "bilinear" {
+        return "Unsupported texture filter. Choose nearest or bilinear."
+    }
+    configuredTextureFilter = name
+    session.status = "Texture filter: " + name
     return ""
 }
 
@@ -434,12 +460,20 @@ func (g *shell) Draw(screen *ebiten.Image) {
 			// use 320x224 or 352x240 pixels, so scale X/Y independently to
 			// correct the pixel aspect while fitting the largest centered 4:3 area.
 			targetW := float64(bounds.Dx())
-			targetH := targetW * 3.0 / 4.0
-			if targetH > float64(bounds.Dy()) {
-				targetH = float64(bounds.Dy())
-				targetW = targetH * 4.0 / 3.0
+			targetH := float64(bounds.Dy())
+			if configuredDisplayMode != "stretch" {
+				targetH = targetW * 3.0 / 4.0
+				if targetH > float64(bounds.Dy()) {
+					targetH = float64(bounds.Dy())
+					targetW = targetH * 4.0 / 3.0
+				}
 			}
 			drawOpts := &ebiten.DrawImageOptions{}
+			if configuredTextureFilter == "bilinear" {
+				drawOpts.Filter = ebiten.FilterLinear
+			} else {
+				drawOpts.Filter = ebiten.FilterNearest
+			}
 			drawOpts.GeoM.Scale(targetW/float64(width), targetH/float64(height))
 			drawOpts.GeoM.Translate(
 				(float64(bounds.Dx())-targetW)/2,
