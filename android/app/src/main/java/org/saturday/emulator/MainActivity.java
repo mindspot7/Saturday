@@ -17,6 +17,8 @@ import android.widget.EditText;
 import android.widget.ScrollView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ImageView;
+import android.graphics.BitmapFactory;
 import android.widget.TextView;
 
 import androidx.documentfile.provider.DocumentFile;
@@ -29,6 +31,8 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_GAME_FOLDER = 101;
@@ -42,6 +46,7 @@ public final class MainActivity extends Activity {
     private LinearLayout recentListContainer;
     private EditText searchInput;
     private final List<File> libraryDiscs = new ArrayList<>();
+    private final Map<String, File> libraryCovers = new HashMap<>();
     private File gameDirectory;
     private boolean gameRunning;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -236,13 +241,20 @@ public final class MainActivity extends Activity {
         }
 
         List<File> discs = new ArrayList<>();
+        libraryCovers.clear();
         for (DocumentFile entry : folder.listFiles()) {
             if (!entry.isFile() || entry.getName() == null) continue;
             String name = entry.getName();
             String lower = name.toLowerCase(java.util.Locale.ROOT);
             File destination = new File(gameDirectory, name);
             copyUri(entry.getUri(), destination);
-            if (lower.endsWith(".chd") || lower.endsWith(".cue")) discs.add(destination);
+            if (lower.endsWith(".chd") || lower.endsWith(".cue")) {
+                discs.add(destination);
+            } else if (lower.endsWith(".png") || lower.endsWith(".jpg")
+                    || lower.endsWith(".jpeg") || lower.endsWith(".webp")) {
+                String stem = name.substring(0, name.lastIndexOf('.')).toLowerCase(java.util.Locale.ROOT);
+                libraryCovers.put(stem, destination);
+            }
         }
 
         if (discs.isEmpty()) {
@@ -261,7 +273,7 @@ public final class MainActivity extends Activity {
         List<String> paths = new ArrayList<>();
         for (File disc : libraryDiscs) paths.add(disc.getAbsolutePath());
         getPreferences(MODE_PRIVATE).edit()
-                .putString("game_library_paths", android.text.TextUtils.join("\\n", paths))
+                .putString("game_library_paths", android.text.TextUtils.join("\n", paths))
                 .apply();
     }
 
@@ -272,7 +284,7 @@ public final class MainActivity extends Activity {
             return;
         }
         libraryDiscs.clear();
-        for (String path : saved.split("\\n")) {
+        for (String path : saved.split("\n")) {
             if (path.isEmpty()) continue;
             File disc = new File(path);
             if (disc.isFile()) libraryDiscs.add(disc);
@@ -298,6 +310,11 @@ public final class MainActivity extends Activity {
             item.setGravity(android.view.Gravity.CENTER_VERTICAL);
             item.setPadding(dp(10), dp(4), dp(6), dp(4));
             item.setBackgroundColor(shown % 2 == 0 ? 0xFF1F2937 : 0xFF273449);
+
+            ImageView cover = createCoverView(disc, dp(54), dp(62));
+            LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(dp(54), dp(62));
+            coverParams.rightMargin = dp(10);
+            item.addView(cover, coverParams);
 
             TextView title = new TextView(this);
             title.setText(disc.getName());
@@ -330,11 +347,40 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private ImageView createCoverView(File disc, int width, int height) {
+        ImageView cover = new ImageView(this);
+        cover.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        cover.setBackgroundColor(0xFF374151);
+        File image = libraryCovers.get(fileStem(disc.getName()));
+        if (image != null && image.isFile()) {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(image.getAbsolutePath(), options);
+            options.inSampleSize = 1;
+            while (options.outWidth / options.inSampleSize > width * 2
+                    || options.outHeight / options.inSampleSize > height * 2) {
+                options.inSampleSize *= 2;
+            }
+            options.inJustDecodeBounds = false;
+            cover.setImageBitmap(BitmapFactory.decodeFile(image.getAbsolutePath(), options));
+        } else {
+            cover.setImageResource(android.R.drawable.ic_menu_gallery);
+            cover.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            cover.setPadding(dp(12), dp(12), dp(12), dp(12));
+        }
+        return cover;
+    }
+
+    private String fileStem(String name) {
+        int dot = name.lastIndexOf('.');
+        return (dot > 0 ? name.substring(0, dot) : name).toLowerCase(java.util.Locale.ROOT);
+    }
+
     private List<String> loadRecentPaths() {
         String saved = getPreferences(MODE_PRIVATE).getString("recent_games_paths", "");
         List<String> paths = new ArrayList<>();
         if (saved.isEmpty()) return paths;
-        for (String path : saved.split("\\n")) {
+        for (String path : saved.split("\n")) {
             if (!path.isEmpty()) paths.add(path);
         }
         return paths;
@@ -349,13 +395,19 @@ public final class MainActivity extends Activity {
         for (String path : loadRecentPaths()) {
             if (!available.contains(path)) continue;
             File disc = new File(path);
+            LinearLayout recentRow = new LinearLayout(this);
+            recentRow.setOrientation(LinearLayout.HORIZONTAL);
+            recentRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            ImageView cover = createCoverView(disc, dp(34), dp(40));
+            recentRow.addView(cover, new LinearLayout.LayoutParams(dp(34), dp(40)));
             Button recentButton = new Button(this);
-            recentButton.setText("▶  " + disc.getName());
+            recentButton.setText(disc.getName());
             recentButton.setAllCaps(false);
             recentButton.setTextSize(12);
             recentButton.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
             recentButton.setOnClickListener(v -> startGame(disc));
-            recentListContainer.addView(recentButton, new LinearLayout.LayoutParams(
+            recentRow.addView(recentButton, new LinearLayout.LayoutParams(0, dp(42), 1));
+            recentListContainer.addView(recentRow, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
             if (++shown == 3) break;
         }
