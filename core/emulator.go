@@ -5,6 +5,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -313,12 +314,12 @@ func (e *Emulator) autoDetectRegion() {
 // Call between RunFrame calls while the CPU workers are parked.
 func (e *Emulator) ApplyRAMCheat(address uint32, value uint32, width int) error {
 	addr := address & 0x07FFFFFF
-	var start, end uint32
+	var end uint32
 	switch {
 	case addr >= 0x00200000 && addr <= 0x002FFFFF:
-		start, end = 0x00200000, 0x002FFFFF
+		end = 0x002FFFFF
 	case addr >= 0x06000000 && addr <= 0x07FFFFFF:
-		start, end = 0x06000000, 0x07FFFFFF
+		end = 0x07FFFFFF
 	default:
 		return fmt.Errorf("cheat address %08X is outside Saturn work RAM", address)
 	}
@@ -340,8 +341,7 @@ func (e *Emulator) ApplyRAMCheat(address uint32, value uint32, width int) error 
 	case 4:
 		e.bus.Write32(addr, value)
 	}
-	_ = start
-	return nil
+		return nil
 }
 
 // GetSRAM returns a copy of the internal backup RAM.
